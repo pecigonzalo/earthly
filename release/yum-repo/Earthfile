@@ -72,7 +72,7 @@ download:
     FROM +aws
     RUN env | grep dev
     RUN --no-cache \
-        --mount type=secret,id=+secrets/aws-credentials,target=/root/.aws/credentials \
+        --mount type=secret,id=+secrets/user/earthly-technologies/aws/credentials,target=/root/.aws/credentials \
         aws s3 cp --recursive s3://staging-pkg/rpm/stable repo
     SAVE ARTIFACT repo AS LOCAL output/repo
 
@@ -126,13 +126,13 @@ upload:
             exit 1; \
         fi
     # upload public key
-    RUN --no-cache \
+    RUN --push \
         --mount type=secret,id=+secrets/earthly-technologies/apt/keys/earthly-apt-public.pgp,target=/apt-key/earthly-apt-public.pgp \
-        --mount type=secret,id=+secrets/aws-credentials,target=/root/.aws/credentials \
+        --mount type=secret,id=+secrets/user/earthly-technologies/aws/credentials,target=/root/.aws/credentials \
         aws s3 cp --acl public-read /apt-key/earthly-apt-public.pgp s3://staging-pkg/earthly.pgp
     # upload signed repo
-    RUN --no-cache \
-        --mount type=secret,id=+secrets/aws-credentials,target=/root/.aws/credentials \
+    RUN --push \
+        --mount type=secret,id=+secrets/user/earthly-technologies/aws/credentials,target=/root/.aws/credentials \
         aws s3 cp --recursive --acl public-read /repo s3://staging-pkg/rpm/stable
 
 build-and-release:
