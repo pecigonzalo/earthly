@@ -1,8 +1,16 @@
 module github.com/earthly/earthly/ast
 
-go 1.19
+go 1.21
 
 require (
-	github.com/antlr/antlr4 v0.0.0-20200225173536-225249fdaef5
+	github.com/antlr/antlr4/runtime/Go/antlr/v4 v4.0.0-20230219212500-1f9a474cc2dc
 	github.com/pkg/errors v0.9.1
+	github.com/stretchr/testify v1.8.4
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

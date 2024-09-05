@@ -13,6 +13,12 @@ Examples of integrating Earthly into various CI systems can be found on the foll
 
 For more general information on CI systems not listed above, see the [CI integration guide](../ci-integration/overview.md).
 
+## Examples by dev environments
+
+Examples of how Earthly can be integrated into different dev environments
+
+* [GitHub Codespaces](https://github.com/earthly/codespaces-example) - shows how Earthly can be used in GitHub Codespaces and Devcontainers
+
 ## Example Earthfiles
 
 In this section, you will find some examples of Earthfiles to familiarize yourself with Earthly.
@@ -37,6 +43,7 @@ Please note that these examples, although similar, are distinct from the ones us
 
 <!-- vale HouseStyle.Spelling = NO -->
 * [c](https://github.com/earthly/earthly/tree/main/examples/c)
+* [clojure](https://github.com/earthly/earthly/tree/main/examples/clojure)
 * [cobol](https://github.com/earthly/earthly/tree/main/examples/cobol)
 * [cpp](https://github.com/earthly/earthly/tree/main/examples/cpp)
 * [dotnet](https://github.com/earthly/earthly/tree/main/examples/dotnet)
@@ -60,7 +67,7 @@ Please note that these examples, although similar, are distinct from the ones us
 
 ### Examples by Earthly features
 
-* [import](https://github.com/earthly/earthly/tree/main/examples/import) - shows how to use the `IMPORT` command to alias project references.
+* [import](https://github.com/earthly/earthly/tree/main/examples/import) - shows how to use the `IMPORT` command to alias Earthfile references.
 * [cutoff-optimization](https://github.com/earthly/earthly/tree/main/examples/cutoff-optimization) - shows that if an intermediate artifact does not change, then the rest of the build will use the cache, even if the source has changed.
 * [multiplatform](https://github.com/earthly/earthly/tree/main/examples/multiplatform) - shows how Earthly can execute builds and create images for multiple platforms, using QEMU emulation.
 * [multiplatform-cross-compile](https://github.com/earthly/earthly/tree/main/examples/multiplatform-cross-compile) - shows has through the use of cross-compilation, you can create images for multiple platforms, without using QEMU emulation.
@@ -74,6 +81,15 @@ Please note that these examples, although similar, are distinct from the ones us
 
 * [readme](https://github.com/earthly/earthly/tree/main/examples/readme) - some sample code we used in our README.
 * [tests](https://github.com/earthly/earthly/tree/main/tests) - a suite of tests Earthly uses to ensure that its features are working correctly.
+
+### Larger Examples And Community Examples
+
+* [Earthly, Rust, GoLang, NodeJS and GitHub Actions Example](https://github.com/earthly/earthly-vs-gha)
+* [Cloud Services In GoLang](https://github.com/earthly/cloud-services-example)
+* [Earthfile workshop Repo](https://github.com/earthly/workshop-2023-09-18)
+* [Python & C Example](https://github.com/earthly/pymerge)
+* [Python Docker Example](https://github.com/earthly/build-transpose/blob/main/Earthfile)
+* [Awesome Earthly - Community Examples](https://github.com/earthly/awesome-earthly)
 
 ### Earthly's own build
 
@@ -111,17 +127,17 @@ Here's a snip from an support request with gitbook:
 
 
 * [Earthfile](https://github.com/earthly/earthly/blob/main/Earthfile) - the root build file
-* [buildkitd/Earthfile](https://github.com/earthly/earthly/blob/main/buildkitd/Earthfile) - the build of the Buildkit daemon
+* [buildkitd/Earthfile](https://github.com/earthly/earthly/blob/main/buildkitd/Earthfile) - the build of the BuildKit daemon
 * [AST/parser/Earthfile](https://github.com/earthly/earthly/blob/main/ast/parser/Earthfile) - the build of the parser, which generates .go files
 * [tests/Earthfile](https://github.com/earthly/earthly/blob/main/tests/Earthfile) - system and smoke tests
-* [contrib/earthfile-syntax-highlighting/Earthfile](https://github.com/earthly/earthly/blob/main/contrib/earthfile-syntax-highlighting/Earthfile) - the build of the VS Code extension
+* [earthfile-grammar/Earthfile](https://github.com/earthly/earthfile-grammar/blob/main/Earthfile) - the build of the VS Code extension
 -->
 
 * [Earthfile](https://tinyurl.com/yt3d3cx6) - the root build file
-* [buildkitd/Earthfile](https://tinyurl.com/yvnpuru7) - the build of the Buildkit daemon
+* [buildkitd/Earthfile](https://tinyurl.com/yvnpuru7) - the build of the BuildKit daemon
 * [AST/parser/Earthfile](https://tinyurl.com/2k3u4vty) - the build of the parser, which generates .go files
 * [tests/Earthfile](https://tinyurl.com/2p8ws579) - system and smoke tests
-* [contrib/earthfile-syntax-highlighting/Earthfile](https://tinyurl.com/yp4y6byn) - the build of the VS Code extension
+* [earthfile-grammar/Earthfile](https://tinyurl.com/2vyjprt6) - the build of the VS Code extension
 
 To invoke Earthly's build, check out the code and then run the following in the root of the repository
 

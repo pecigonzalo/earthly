@@ -11,25 +11,38 @@ import (
 	"time"
 
 	secretsapi "github.com/earthly/cloud-api/secrets"
-	"github.com/golang/protobuf/ptypes"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/ssh/agent"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/earthly/earthly/util/hint"
+)
+
+type AuthMethod string
+
+const (
+	AuthMethodSSH       AuthMethod = "ssh"
+	AuthMethodPassword  AuthMethod = "password"
+	AuthMethodToken     AuthMethod = "token"
+	AuthMethodCachedJWT AuthMethod = "cached jwt"
 )
 
 // TokenDetail contains token information
 type TokenDetail struct {
-	Name   string
-	Write  bool
-	Expiry time.Time
+	Name           string
+	Write          bool
+	Expiry         time.Time
+	Indefinite     bool
+	LastAccessedAt time.Time
 }
 
-func (c *client) ListPublicKeys(ctx context.Context) ([]string, error) {
+func (c *Client) ListPublicKeys(ctx context.Context) ([]string, error) {
 	status, body, err := c.doCall(ctx, "GET", "/api/v0/account/keys", withAuth())
 	if err != nil {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return nil, errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -37,7 +50,7 @@ func (c *client) ListPublicKeys(ctx context.Context) ([]string, error) {
 	}
 
 	keys := []string{}
-	for _, k := range strings.Split(body, "\n") {
+	for _, k := range strings.Split(string(body), "\n") {
 		if k != "" {
 			keys = append(keys, k)
 		}
@@ -45,14 +58,14 @@ func (c *client) ListPublicKeys(ctx context.Context) ([]string, error) {
 	return keys, nil
 }
 
-func (c *client) AddPublickKey(ctx context.Context, key string) error {
+func (c *Client) AddPublicKey(ctx context.Context, key string) error {
 	key = strings.TrimSpace(key) + "\n"
-	status, body, err := c.doCall(ctx, "PUT", "/api/v0/account/keys", withAuth(), withBody(key))
+	status, body, err := c.doCall(ctx, "PUT", "/api/v0/account/keys", withAuth(), withBody([]byte(key)))
 	if err != nil {
 		return err
 	}
 	if status != http.StatusCreated {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -61,14 +74,14 @@ func (c *client) AddPublickKey(ctx context.Context, key string) error {
 	return nil
 }
 
-func (c *client) RemovePublickKey(ctx context.Context, key string) error {
+func (c *Client) RemovePublicKey(ctx context.Context, key string) error {
 	key = strings.TrimSpace(key) + "\n"
-	status, body, err := c.doCall(ctx, "DELETE", "/api/v0/account/keys", withAuth(), withBody(key))
+	status, body, err := c.doCall(ctx, "DELETE", "/api/v0/account/keys", withAuth(), withBody([]byte(key)))
 	if err != nil {
 		return err
 	}
 	if status != http.StatusOK {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -77,39 +90,39 @@ func (c *client) RemovePublickKey(ctx context.Context, key string) error {
 	return nil
 }
 
-func (c *client) CreateToken(ctx context.Context, name string, write bool, expiry *time.Time) (string, error) {
+func (c *Client) CreateToken(ctx context.Context, name string, write bool, expiry *time.Time, overWrite bool) (string, error) {
 	name = url.QueryEscape(name)
-
-	expiryPB, err := ptypes.TimestampProto(expiry.UTC())
-	if err != nil {
-		return "", errors.Wrap(err, "TimestampProto failed")
-	}
-
 	authToken := secretsapi.AuthToken{
-		Write:  write,
-		Expiry: expiryPB,
+		Write:        write,
+		KeepExisting: !overWrite,
+	}
+	if expiry != nil {
+		authToken.Expiry = timestamppb.New(expiry.UTC())
 	}
 	status, body, err := c.doCall(ctx, "PUT", "/api/v0/account/token/"+name, withAuth(), withJSONBody(&authToken))
 	if err != nil {
 		return "", err
 	}
 	if status != http.StatusCreated {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return "", errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
+		if status == http.StatusConflict {
+			return "", hint.Wrap(errors.New(msg), "To overwrite the existing token, use the --overwrite flag")
+		}
 		return "", errors.Errorf("failed to create new token: %s", msg)
 	}
-	return body, nil
+	return string(body), nil
 }
 
-func (c *client) ListTokens(ctx context.Context) ([]*TokenDetail, error) {
+func (c *Client) ListTokens(ctx context.Context) ([]*TokenDetail, error) {
 	status, body, err := c.doCall(ctx, "GET", "/api/v0/account/tokens", withAuth())
 	if err != nil {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return nil, errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -117,34 +130,36 @@ func (c *client) ListTokens(ctx context.Context) ([]*TokenDetail, error) {
 	}
 
 	var listTokensResponse secretsapi.ListAuthTokensResponse
-	err = c.jm.Unmarshal(bytes.NewReader([]byte(body)), &listTokensResponse)
+	err = c.jum.Unmarshal(body, &listTokensResponse)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to unmarshal listTokens response")
 	}
 
 	tokenDetails := []*TokenDetail{}
 	for _, token := range listTokensResponse.Tokens {
-		expiry, err := ptypes.Timestamp(token.Expiry)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to decode expiry proto timestamp")
+		var lastAccessedAt time.Time
+		if token.LastAccessedAt != nil {
+			lastAccessedAt = token.LastAccessedAt.AsTime()
 		}
 		tokenDetails = append(tokenDetails, &TokenDetail{
-			Name:   token.Name,
-			Write:  token.Write,
-			Expiry: expiry,
+			Name:           token.Name,
+			Write:          token.Write,
+			Expiry:         token.Expiry.AsTime(),
+			Indefinite:     token.Indefinite,
+			LastAccessedAt: lastAccessedAt,
 		})
 	}
 	return tokenDetails, nil
 }
 
-func (c *client) RemoveToken(ctx context.Context, name string) error {
+func (c *Client) RemoveToken(ctx context.Context, name string) error {
 	name = url.QueryEscape(name)
 	status, body, err := c.doCall(ctx, "DELETE", "/api/v0/account/token/"+name, withAuth())
 	if err != nil {
 		return err
 	}
 	if status != http.StatusOK {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -153,23 +168,19 @@ func (c *client) RemoveToken(ctx context.Context, name string) error {
 	return nil
 }
 
-func (c *client) WhoAmI(ctx context.Context) (string, string, bool, error) {
+func (c *Client) WhoAmI(ctx context.Context) (string, AuthMethod, bool, error) {
 	email, writeAccess, err := c.ping(ctx)
 	if err != nil {
 		return "", "", false, err
 	}
-
-	authType := "ssh"
-	if c.password != "" {
-		authType = "password"
-	} else if c.authCredToken != "" {
-		authType = "token"
+	authMethod := c.lastAuthMethod
+	if authMethod == "" {
+		authMethod = AuthMethodCachedJWT
 	}
-
-	return email, authType, writeAccess, nil
+	return email, authMethod, writeAccess, nil
 }
 
-func (c *client) GetPublicKeys(ctx context.Context) ([]*agent.Key, error) {
+func (c *Client) GetPublicKeys(ctx context.Context) ([]*agent.Key, error) {
 	keys, err := c.sshAgent.List()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to list ssh keys")
@@ -190,13 +201,13 @@ func (c *client) GetPublicKeys(ctx context.Context) ([]*agent.Key, error) {
 	return keys, nil
 }
 
-func (c *client) RegisterEmail(ctx context.Context, email string) error {
+func (c *Client) RegisterEmail(ctx context.Context, email string) error {
 	status, body, err := c.doCall(ctx, "PUT", fmt.Sprintf("/api/v0/account/create/%s", url.QueryEscape(email)))
 	if err != nil {
 		return err
 	}
 	if status != http.StatusCreated {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -205,7 +216,7 @@ func (c *client) RegisterEmail(ctx context.Context, email string) error {
 	return nil
 }
 
-func (c *client) CreateAccount(ctx context.Context, email, verificationToken, password, publicKey string, termsConditionsPrivacy bool) error {
+func (c *Client) CreateAccount(ctx context.Context, email, verificationToken, password, publicKey string, termsConditionsPrivacy bool) error {
 	if !IsValidEmail(ctx, email) {
 		return errors.Errorf("invalid email: %q", email)
 	}
@@ -229,7 +240,7 @@ func (c *client) CreateAccount(ctx context.Context, email, verificationToken, pa
 		return err
 	}
 	if status != http.StatusCreated {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -254,7 +265,7 @@ func (c *client) CreateAccount(ctx context.Context, email, verificationToken, pa
 
 // ping calls the ping endpoint on the server,
 // which is used to both test an auth token and retrieve the associated email address.
-func (c *client) ping(ctx context.Context) (email string, writeAccess bool, err error) {
+func (c *Client) ping(ctx context.Context) (email string, writeAccess bool, err error) {
 	status, body, err := c.doCall(ctx, "GET", "/api/v0/account/ping", withAuth())
 	if err != nil {
 		return "", false, errors.Wrap(err, "failed executing ping request")
@@ -266,14 +277,14 @@ func (c *client) ping(ctx context.Context) (email string, writeAccess bool, err 
 		return "", false, errors.Errorf("unexpected status code from ping: %d", status)
 	}
 	var resp secretsapi.PingResponse
-	err = c.jm.Unmarshal(bytes.NewReader([]byte(body)), &resp)
+	err = c.jum.Unmarshal(body, &resp)
 	if err != nil {
 		return "", false, errors.Wrap(err, "failed to unmarshal challenge response")
 	}
 	return resp.Email, resp.WriteAccess, nil
 }
 
-func (c *client) AccountResetReqestToken(ctx context.Context, email string) error {
+func (c *Client) AccountResetRequestToken(ctx context.Context, email string) error {
 	email = url.QueryEscape(email)
 	status, _, err := c.doCall(ctx, "PUT", "/api/v0/account/reset/"+email)
 	if err != nil {
@@ -285,7 +296,7 @@ func (c *client) AccountResetReqestToken(ctx context.Context, email string) erro
 	return nil
 }
 
-func (c *client) AccountReset(ctx context.Context, email, token, password string) error {
+func (c *Client) AccountReset(ctx context.Context, email, token, password string) error {
 	createAccountRequest := secretsapi.ResetPasswordRequest{
 		Email:             email,
 		VerificationToken: token,

@@ -1,0 +1,24 @@
+VERSION 0.8
+
+ARG --global KIND_VERSION=0.20.0
+
+all:
+    BUILD +alpine-kind
+    BUILD +ubuntu-kind
+
+alpine-kind:
+    ARG DIND_IMAGE=earthly/dind:alpine-3.19-docker-25.0.5-r0
+    FROM $DIND_IMAGE
+    RUN apk add curl
+    RUN curl -Lo ./kind https://kind.sigs.k8s.io/dl/v$KIND_VERSION/kind-linux-amd64 && chmod +x kind
+    WITH DOCKER
+        RUN ./kind create cluster --verbosity 99999 --retain
+    END
+
+ubuntu-kind:
+    ARG DIND_IMAGE=earthly/dind:ubuntu-23.04-docker-25.0.2-1
+    FROM $DIND_IMAGE
+    RUN curl -Lo ./kind https://kind.sigs.k8s.io/dl/v$KIND_VERSION/kind-linux-amd64 && chmod +x kind
+    WITH DOCKER
+        RUN ./kind create cluster --verbosity 99999 --retain
+    END

@@ -2,29 +2,32 @@ package earthfile2llb
 
 import (
 	"context"
-	"fmt"
 
+	"github.com/earthly/earthly/buildcontext"
+	"github.com/earthly/earthly/buildcontext/provider"
+	"github.com/earthly/earthly/cleanup"
+	"github.com/earthly/earthly/cmd/earthly/bk"
+	"github.com/earthly/earthly/conslogging"
+	"github.com/earthly/earthly/domain"
+	"github.com/earthly/earthly/features"
+	"github.com/earthly/earthly/logbus"
+	"github.com/earthly/earthly/states"
 	"github.com/earthly/earthly/util/containerutil"
 	"github.com/earthly/earthly/util/gatewaycrafter"
 	"github.com/earthly/earthly/util/llbutil/secretprovider"
 	"github.com/earthly/earthly/util/platutil"
+	"github.com/earthly/earthly/util/syncutil/semutil"
+	"github.com/earthly/earthly/util/syncutil/serrgroup"
+	"github.com/earthly/earthly/variables"
 	"github.com/moby/buildkit/client/llb"
 	gwclient "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/util/apicaps"
 	"github.com/pkg/errors"
-
-	"github.com/earthly/earthly/ast/spec"
-	"github.com/earthly/earthly/buildcontext"
-	"github.com/earthly/earthly/buildcontext/provider"
-	"github.com/earthly/earthly/cleanup"
-	"github.com/earthly/earthly/conslogging"
-	"github.com/earthly/earthly/domain"
-	"github.com/earthly/earthly/features"
-	"github.com/earthly/earthly/states"
-	"github.com/earthly/earthly/util/syncutil/semutil"
-	"github.com/earthly/earthly/util/syncutil/serrgroup"
-	"github.com/earthly/earthly/variables"
 )
+
+type ProjectAdder interface {
+	AddProject(org, proj string)
+}
 
 // ConvertOpt holds conversion parameters.
 type ConvertOpt struct {
@@ -46,7 +49,7 @@ type ConvertOpt struct {
 	CleanCollection *cleanup.Collection
 	// Visited is a collection of target states which have been converted to LLB.
 	// This is used for deduplication and infinite cycle detection.
-	Visited *states.VisitedCollection
+	Visited states.VisitedCollection
 	// PlatformResolver is a platform resolver, which keeps track of
 	// the current platform, the native platform, the user platform, and
 	// the default platform.
@@ -91,6 +94,10 @@ type ConvertOpt struct {
 	// DoPushes controls when a SAVE IMAGE --push, and RUN --push commands are executed;
 	// SAVE IMAGE --push ... will still export an image to the local docker instance (as long as DoSaves=true)
 	DoPushes bool
+	// IsCI determines whether it is running from a CI environment.
+	IsCI bool
+	// EarthlyCIRunner determines whether it is running from an Earthly CI environment.
+	EarthlyCIRunner bool
 	// ForceSaveImage is used to force all SAVE IMAGE commands are executed regardless of if they are
 	// for a local or remote target; this is to support the legacy behaviour that was first introduced in earthly (up to 0.5)
 	// When this is set to false, SAVE IMAGE commands are only executed when DoSaves is true.
@@ -101,8 +108,10 @@ type ConvertOpt struct {
 	GitLookup *buildcontext.GitLookup
 	// LocalStateCache provides a cache for local pllb.States
 	LocalStateCache *LocalStateCache
-	// UseLocalRegistry indicates whether the the BuildKit-embedded registry can be used for exports.
+	// UseLocalRegistry indicates whether the BuildKit-embedded registry can be used for exports.
 	UseLocalRegistry bool
+	// LocalRegistryAddr is the address of the BuildKit-embedded registry.
+	LocalRegistryAddr string
 
 	// Features is the set of enabled features
 	Features *features.Features
@@ -123,6 +132,10 @@ type ConvertOpt struct {
 
 	// parentDepSub is a channel informing of any new dependencies from the parent.
 	parentDepSub chan string // chan of sts IDs.
+
+	// TargetInputHashStackSet is a set of target input hashes that are currently in the call stack.
+	// This is used to detect infinite cycles.
+	TargetInputHashStackSet map[string]bool
 
 	// ContainerFrontend is the currently used container frontend, as detected by Earthly at app start. It provides info
 	// and access to commands to manipulate the current container frontend.
@@ -151,6 +164,51 @@ type ConvertOpt struct {
 
 	// LLBCaps indicates that builder's capabilities
 	LLBCaps *apicaps.CapSet
+
+	// MainTargetDetailsFunc is a custom function used to handle the target details, once known.
+	MainTargetDetailsFunc func(TargetDetails) error
+
+	// Logbus is the bus used for logging and metadata reporting.
+	Logbus *logbus.Bus
+
+	// The runner used to execute the target on. This is used only for metadata reporting purposes.
+	// May be one of the following:
+	// * "local:<hostname>" - local builds
+	// * "bk:<buildkit-address>" - remote builds via buildkit
+	// * "sat:<org-name>/<sat-name>" - remote builds via satellite
+	Runner string
+
+	// ProjectAdder is a callback that is used to discover PROJECT <org>/<project> values
+	ProjectAdder ProjectAdder
+
+	// FilesWithCommandRenameWarning keeps track of the files for which the COMMAND => FUNCTION warning was displayed
+	// this can be removed in VERSION 0.8
+	FilesWithCommandRenameWarning map[string]bool
+
+	// parentTargetID is the Logbus target ID of the parent target, if any. It
+	// is used to link together targets.
+	parentTargetID string
+
+	// parentCommandID is the Logbus command ID of whichever command initiated
+	// the convert operation. It's used to link commands to their referenced targets.
+	parentCommandID string
+
+	// BuildkitSkipper allows for additions and existence checks for auto-skip hash values.
+	BuildkitSkipper bk.BuildkitSkipper
+
+	// NoAutoSkip disables auto-skip usages.
+	NoAutoSkip bool
+
+	// OnExecutionSuccess is called after a forceExecution successfully runs; it is used to save auto-skip hashes
+	OnExecutionSuccess func(context.Context)
+}
+
+// TargetDetails contains details about the target being built.
+type TargetDetails struct {
+	// EarthlyOrgName is the name of the Earthly org.
+	EarthlyOrgName string
+	// EarthlyProjectName is the name of the Earthly project.
+	EarthlyProjectName string
 }
 
 // Earthfile2LLB parses a earthfile and executes the statements for a given target.
@@ -158,11 +216,18 @@ func Earthfile2LLB(ctx context.Context, target domain.Target, opt ConvertOpt, in
 	if opt.SolveCache == nil {
 		opt.SolveCache = states.NewSolveCache()
 	}
-	if opt.Visited == nil {
-		opt.Visited = states.NewVisitedCollection()
-	}
 	if opt.MetaResolver == nil {
 		opt.MetaResolver = NewCachedMetaResolver(opt.GwClient)
+	}
+	if opt.TargetInputHashStackSet == nil {
+		opt.TargetInputHashStackSet = make(map[string]bool)
+	} else {
+		// We are in a recursive call. Copy the stack set.
+		newMap := make(map[string]bool)
+		for k, v := range opt.TargetInputHashStackSet {
+			newMap[k] = v
+		}
+		opt.TargetInputHashStackSet = newMap
 	}
 	egWait := false
 	if opt.ErrorGroup == nil {
@@ -194,6 +259,14 @@ func Earthfile2LLB(ctx context.Context, target domain.Target, opt ConvertOpt, in
 		return nil, errors.Wrapf(err, "resolve build context for target %s", target.String())
 	}
 
+	if opt.Visited == nil {
+		if bc.Features.UseVisitedUpfrontHashCollection {
+			opt.Visited = states.NewVisitedUpfrontHashCollection()
+		} else {
+			opt.Visited = states.NewLegacyVisitedCollection()
+		}
+	}
+
 	opt.Features = bc.Features
 	if initialCall && !bc.Features.ReferencedSaveOnly {
 		opt.DoSaves = !target.IsRemote() // legacy mode only saves artifacts that are locally referenced
@@ -201,14 +274,8 @@ func Earthfile2LLB(ctx context.Context, target domain.Target, opt ConvertOpt, in
 	}
 	opt.PlatformResolver.AllowNativeAndUser = opt.Features.NewPlatform
 
-	wbWait := false
 	if opt.waitBlock == nil {
 		opt.waitBlock = newWaitBlock()
-
-		// we must call opt.waitBlock.wait(), since we are the creator.
-		// unfortunately this must be done before opt.ErrorGroup.Wait() is called (rather than here via a defer),
-		// as the ctx would otherwise be canceled.
-		wbWait = true
 	}
 
 	targetWithMetadata := bc.Ref.(domain.Target)
@@ -216,22 +283,86 @@ func Earthfile2LLB(ctx context.Context, target domain.Target, opt ConvertOpt, in
 	if err != nil {
 		return nil, err
 	}
+
+	if opt.parentTargetID != "" {
+		if parentTarget, ok := opt.Logbus.Run().Target(opt.parentTargetID); ok {
+			parentTarget.AddDependsOn(sts.ID)
+		}
+	}
+
+	if opt.parentCommandID != "" {
+		if parentCmd, ok := opt.Logbus.Run().Command(opt.parentCommandID); ok {
+			parentCmd.AddDependsOn(sts.ID, target.GetName())
+		}
+	}
+
+	tiHash, err := sts.TargetInput().Hash()
+	if err != nil {
+		return nil, err
+	}
 	if found {
+		if opt.TargetInputHashStackSet[tiHash] {
+			return nil, errors.Errorf("infinite cycle detected for target %s", target.String())
+		}
+		// Wait for the existing sts to complete first.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-sts.Done():
+		}
+
+		// The found target may have initially been created by a FROM or a COPY;
+		// however, if it is referenced a second time by a BUILD, it may contain items that
+		// require a save (export to the local host) or a push
 		if opt.DoSaves {
-			// Set the do saves flag, in case it was not set before.
 			sts.SetDoSaves()
 		}
+		if opt.DoPushes {
+			sts.SetDoPushes()
+		}
+		if opt.DoSaves || opt.DoPushes {
+			err := sts.Wait(ctx)
+			if err != nil {
+				return nil, errors.Wrapf(err, "wait failed on target %s", target.String())
+			}
+		}
+		sts.AttachTopLevelWaitItems(ctx, opt.waitBlock)
+
 		// This target has already been done.
 		return &states.MultiTarget{
 			Final:   sts,
 			Visited: opt.Visited,
 		}, nil
 	}
+	opt.TargetInputHashStackSet[tiHash] = true
+	if opt.MainTargetDetailsFunc != nil {
+		err := opt.MainTargetDetailsFunc(TargetDetails{
+			EarthlyOrgName:     bc.EarthlyOrgName,
+			EarthlyProjectName: bc.EarthlyProjectName,
+		})
+		if err != nil {
+			return nil, errors.Wrapf(err, "target details handler error: %v", err)
+		}
+		opt.MainTargetDetailsFunc = nil
+	}
+
+	opt.Console.VerbosePrintf("earthfile2llb building %s with OverridingVars=%v",
+		targetWithMetadata.StringCanonical(), opt.OverridingVars.Map())
+
 	converter, err := NewConverter(ctx, targetWithMetadata, bc, sts, opt)
 	if err != nil {
 		return nil, err
 	}
-	interpreter := newInterpreter(converter, targetWithMetadata, opt.AllowPrivileged, opt.ParallelConversion, opt.Console, opt.GitLookup)
+
+	interpreter := newInterpreter(
+		converter,
+		targetWithMetadata,
+		opt.AllowPrivileged,
+		opt.ParallelConversion,
+		opt.Console,
+		opt.GitLookup,
+	)
+
 	err = interpreter.Run(ctx, bc.Earthfile)
 	if err != nil {
 		return nil, err
@@ -242,8 +373,8 @@ func Earthfile2LLB(ctx context.Context, target domain.Target, opt ConvertOpt, in
 		return nil, err
 	}
 
-	if wbWait {
-		err = opt.waitBlock.wait(ctx)
+	if initialCall {
+		err = opt.waitBlock.Wait(ctx, opt.DoPushes, opt.DoSaves)
 		if err != nil {
 			return nil, err
 		}
@@ -256,54 +387,6 @@ func Earthfile2LLB(ctx context.Context, target domain.Target, opt ConvertOpt, in
 			return nil, err
 		}
 	}
+
 	return mts, nil
-}
-
-// GetTargets returns a list of targets from an Earthfile.
-// Note that the passed in domain.Target's target name is ignored (only the reference to the Earthfile is used)
-func GetTargets(ctx context.Context, resolver *buildcontext.Resolver, gwClient gwclient.Client, target domain.Target) ([]string, error) {
-	platr := platutil.NewResolver(platutil.GetUserPlatform())
-	bc, err := resolver.Resolve(ctx, gwClient, platr, target)
-	if err != nil {
-		return nil, errors.Wrapf(err, "resolve build context for target %s", target.String())
-	}
-	targets := make([]string, 0, len(bc.Earthfile.Targets))
-	for _, target := range bc.Earthfile.Targets {
-		targets = append(targets, target.Name)
-	}
-	return targets, nil
-}
-
-// GetTargetArgs returns a list of build arguments for a specified target
-func GetTargetArgs(ctx context.Context, resolver *buildcontext.Resolver, gwClient gwclient.Client, target domain.Target) ([]string, error) {
-	platr := platutil.NewResolver(platutil.GetUserPlatform())
-	bc, err := resolver.Resolve(ctx, gwClient, platr, target)
-	if err != nil {
-		return nil, errors.Wrapf(err, "resolve build context for target %s", target.String())
-	}
-	var t *spec.Target
-	for _, tt := range bc.Earthfile.Targets {
-		if tt.Name == target.Target {
-			t = &tt
-			break
-		}
-	}
-	if t == nil {
-		return nil, fmt.Errorf("faild to find %s", target.String())
-	}
-	var args []string
-	for _, stmt := range t.Recipe {
-		if stmt.Command != nil && stmt.Command.Name == "ARG" {
-			isBase := t.Name == "base"
-			// since Arg opts are ignored (and feature flags are not available) we set explicitGlobalArgFlag as false
-			explicitGlobal := false
-			_, argName, _, err := parseArgArgs(ctx, *stmt.Command, isBase, explicitGlobal)
-			if err != nil {
-				return nil, errors.Wrapf(err, "failed to parse ARG arguments %v", stmt.Command.Args)
-			}
-			args = append(args, argName)
-		}
-	}
-	return args, nil
-
 }

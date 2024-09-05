@@ -1,13 +1,13 @@
-VERSION --new-platform 0.6
+VERSION 0.8
 
-FROM alpine:3.15
+FROM alpine:3.18
 WORKDIR /work
 
 test:
     FROM +run-all
     ARG nativeUname=$(uname -m)
-    ARG tests="regular/linux/arm/v7 regular/linux/arm64 regular/linux/amd64 
-        native user default
+    ARG tests="regular/linux/arm/v7 regular/linux/arm64 regular/linux/amd64
+        native default
         override/linux/arm64 override/linux/amd64
         default_override/linux/arm64 default_override/linux/amd64
         copy_override/linux/arm64 copy_override/linux/amd64
@@ -32,7 +32,7 @@ test:
                 copy_override/linux/amd64|copy_other_set/linux/amd64|copy/linux/amd64|override/linux/amd64|default_override/linux/amd64|regular/linux/amd64) \
                     test \$um = x86_64 && \
                     test \$p = linux/amd64 ;; \
-                native|user|default|copy_native1|copy_native2) \
+                native|default|copy_native1|copy_native2) \
                     test \$um = \$nativeUname && \
                     case $nativeUname in \
                         aarch64) test \$p = linux/arm64 -o \$p = linux/arm64/v8 ;; \
@@ -71,7 +71,6 @@ run-all:
     COPY --platform=linux/arm64 +run/* ./out/regular/linux/arm64/
     COPY --platform=linux/arm/v7 +run/* ./out/regular/linux/arm/v7/
     COPY --platform=native +run/* ./out/native/
-    COPY --platform=user +run/* ./out/user/
     COPY +run/* ./out/default/
 
     # Start as one platform and end up as another.
@@ -93,9 +92,9 @@ run-all:
 run:
     ARG override_platform
     IF [ -n "$override_platform" ]
-        FROM --platform=$override_platform alpine:3.15
+        FROM --platform=$override_platform alpine:3.18
     ELSE
-        FROM alpine:3.15
+        FROM alpine:3.18
     END
     WORKDIR /work
     ARG USERPLATFORM
@@ -108,7 +107,7 @@ run:
     SAVE ARTIFACT ./*
 
 run-copy:
-    FROM alpine:3.15
+    FROM alpine:3.18
     WORKDIR /work
     ARG copy_platform
     IF [ -n "$copy_platform" ]
@@ -121,9 +120,9 @@ run-copy:
 copy-target:
     ARG copy_override_platform
     IF [ -n "$copy_override_platform" ]
-        FROM --platform=$copy_override_platform alpine:3.15
+        FROM --platform=$copy_override_platform alpine:3.18
     ELSE
-        FROM alpine:3.15
+        FROM alpine:3.18
     END
     WORKDIR /work
     ARG USERPLATFORM

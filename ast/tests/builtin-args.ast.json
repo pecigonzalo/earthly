@@ -3,7 +3,7 @@
     {
       "command": {
         "args": [
-          "alpine:3.15"
+          "alpine:3.18"
         ],
         "name": "FROM"
       }
@@ -64,6 +64,30 @@
         {
           "command": {
             "args": [
+              "EARTHLY_GIT_COMMIT_AUTHOR_TIMESTAMP"
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "EARTHLY_GIT_BRANCH"
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "EARTHLY_GIT_REFS"
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
               "EARTHLY_VERSION"
             ],
             "name": "ARG"
@@ -81,6 +105,14 @@
           "command": {
             "args": [
               "EARTHLY_LOCALLY"
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "EARTHLY_CI_RUNNER"
             ],
             "name": "ARG"
           }
@@ -206,6 +238,36 @@
           "command": {
             "args": [
               "test",
+              "-z",
+              "\"$EARTHLY_GIT_COMMIT_AUTHOR_TIMESTAMP\""
+            ],
+            "name": "RUN"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
+              "-z",
+              "\"$EARTHLY_GIT_BRANCH\""
+            ],
+            "name": "RUN"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
+              "-z",
+              "\"$EARTHLY_GIT_REFS\""
+            ],
+            "name": "RUN"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
               "-n",
               "\"$EARTHLY_VERSION\""
             ],
@@ -232,14 +294,55 @@
             ],
             "name": "RUN"
           }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
+              "-z",
+              "\"$EARTHLY_CI_RUNNER\""
+            ],
+            "name": "RUN"
+          }
+        }
+      ]
+    },
+    {
+      "name": "earthly-ci-runner-builtin-arg-test",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "EARTHLY_CI_RUNNER"
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "EXPECTED_VALUE"
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
+              "\"$EARTHLY_CI_RUNNER\"",
+              "=",
+              "\"$EXPECTED_VALUE\""
+            ],
+            "name": "RUN"
+          }
         }
       ]
     }
   ],
   "version": {
     "args": [
-      "--earthly-version-arg",
-      "0.6"
+      "0.8"
     ]
   }
 }

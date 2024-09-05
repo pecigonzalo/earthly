@@ -3,7 +3,7 @@
     {
       "command": {
         "args": [
-          "alpine:3.15"
+          "alpine:3.18"
         ],
         "name": "FROM"
       }
@@ -816,7 +816,7 @@
             "args": [
               "ln",
               "-s",
-              "nonexistanttarget",
+              "nonexistenttarget",
               "symlink"
             ],
             "name": "RUN"
@@ -854,7 +854,7 @@
               "symlink",
               "|",
               "grep",
-              "nonexistanttarget"
+              "nonexistenttarget"
             ],
             "name": "RUN"
           }
@@ -867,11 +867,7 @@
               "2>&1",
               "|",
               "grep",
-              "'No",
-              "such",
-              "file",
-              "or",
-              "directory'"
+              "'No such file or directory'"
             ],
             "name": "RUN"
           }
@@ -968,11 +964,7 @@
               "2>&1",
               "|",
               "grep",
-              "'No",
-              "such",
-              "file",
-              "or",
-              "directory'"
+              "'No such file or directory'"
             ],
             "name": "RUN"
           }
@@ -1171,12 +1163,141 @@
           }
         }
       ]
+    },
+    {
+      "name": "copy-empty-src",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "SRC",
+              "=",
+              "\"\""
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "$SRC",
+              "$SRC"
+            ],
+            "name": "COPY"
+          }
+        }
+      ]
+    },
+    {
+      "name": "copy-empty-src-if-exists",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "SRC",
+              "=",
+              "\"\""
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "--if-exists",
+              "$SRC",
+              "$SRC"
+            ],
+            "name": "COPY"
+          }
+        }
+      ]
+    },
+    {
+      "name": "copy-if-exists-wildcard",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "--if-exists",
+              "non_existing_folder/*",
+              "/"
+            ],
+            "name": "COPY"
+          }
+        }
+      ]
+    },
+    {
+      "name": "copy-if-exists-wildcard-exists-empty",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "--if-exists",
+              "existing_folder/*",
+              "."
+            ],
+            "name": "COPY"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "!",
+              "test",
+              "-f",
+              "foo"
+            ],
+            "name": "RUN"
+          }
+        }
+      ]
+    },
+    {
+      "name": "copy-if-exists-wildcard-exists",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "--if-exists",
+              "existing_folder/*",
+              "."
+            ],
+            "name": "COPY"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
+              "-f",
+              "foo"
+            ],
+            "name": "RUN"
+          }
+        }
+      ]
+    },
+    {
+      "name": "copy-wildcard",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "--if-exists",
+              "prefix-*",
+              "/"
+            ],
+            "name": "COPY"
+          }
+        }
+      ]
     }
   ],
   "version": {
     "args": [
-      "--use-chmod",
-      "0.6"
+      "0.8"
     ]
   }
 }

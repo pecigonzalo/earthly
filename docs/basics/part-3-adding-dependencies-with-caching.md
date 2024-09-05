@@ -4,7 +4,7 @@ To copy the files for [this example ( Part 3 )](https://github.com/earthly/earth
 ```bash
 earthly --artifact github.com/earthly/earthly/examples/tutorial/go:main+part3/part3 ./part3
 ```
-Examples in [Python](#more-examples), [Javascript](#more-examples) and [Java](#more-examples) are at the bottom of this page.
+Examples in [Python](#more-examples), [JavaScript](#more-examples) and [Java](#more-examples) are at the bottom of this page.
 
 ## Dependencies
 Now let's imagine that we want to add some dependencies to our app. In Go, that means adding `go.mod` and `go.sum`. 
@@ -43,19 +43,19 @@ Now we can update our Earthfile to copy in the `go.mod` and `go.sum`.
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 
 build:
     COPY go.mod go.sum .
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 
 docker:
-    COPY +build/go-example .
-    ENTRYPOINT ["/go-example/go-example"]
+    COPY +build/example .
+    ENTRYPOINT ["/go-workdir/example"]
     SAVE IMAGE go-example:latest
 ```
 This works, but it is inefficient because we have not made proper use of caching. In the current setup, when a file changes, the corresponding `COPY` command is re-executed without cache, causing all commands after it to also re-execute without cache.
@@ -67,9 +67,9 @@ If, however, we could first download the dependencies and only afterwards copy a
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 
 build:
     # Download deps before copying code.
@@ -77,12 +77,12 @@ build:
     RUN go mod download
     # Copy and build code.
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 
 docker:
-    COPY +build/go-example .
-    ENTRYPOINT ["/go-example/go-example"]
+    COPY +build/example .
+    ENTRYPOINT ["/go-workdir/example"]
     SAVE IMAGE go-example:latest
 ```
 
@@ -95,9 +95,9 @@ In some cases, the dependencies might be used in more than one build target. For
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 
 deps:
     COPY go.mod go.sum ./
@@ -109,32 +109,32 @@ deps:
 build:
     FROM +deps
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 
 docker:
-    COPY +build/go-example .
-    ENTRYPOINT ["/go-example/go-example"]
+    COPY +build/example .
+    ENTRYPOINT ["/go-workdir/example"]
     SAVE IMAGE go-example:latest
 ```
 
 ## More Examples
 
 <details open>
-<summary>Javascript</summary>
+<summary>JavaScript</summary>
 
-To copy the files for [this example ( Part 4 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/js/part4) run
+To copy the files for [this example ( Part 3 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/js/part3) run
 
 ```bash
-earthly --artifact github.com/earthly/earthly/examples/tutorial/js:main+part4/part4 ./part4
+earthly --artifact github.com/earthly/earthly/examples/tutorial/js:main+part3/part3 ./part3
 ```
 
-Note that in our case, only the Javascript version has an example where `FROM +deps` is used in more than one place: both in `build` and in `docker`. Nevertheless, all versions show how dependencies may be separated.
+Note that in our case, only the JavaScript version has an example where `FROM +deps` is used in more than one place: both in `build` and in `docker`. Nevertheless, all versions show how dependencies may be separated.
 
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM node:13.10.1-alpine3.11
 WORKDIR /js-example
 
@@ -167,16 +167,16 @@ docker:
 <details open>
 <summary>Java</summary>
 
-To copy the files for [this example ( Part 4 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/java/part4) run
+To copy the files for [this example ( Part 3 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/java/part3) run
 
 ```bash
-earthly --artifact github.com/earthly/earthly/examples/tutorial/java:main+part4/part4 ./part4
+earthly --artifact github.com/earthly/earthly/examples/tutorial/java:main+part3/part3 ./part3
 ```
 
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM openjdk:8-jdk-alpine
 RUN apk add --update --no-cache gradle
 WORKDIR /java-example
@@ -206,16 +206,16 @@ docker:
 <details open>
 <summary>Python</summary>
 
-To copy the files for [this example ( Part 4 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/python/part4) run
+To copy the files for [this example ( Part 3 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/python/part3) run
 
 ```bash
-earthly --artifact github.com/earthly/earthly/examples/tutorial/python:main+part4/part4 ./part4
+earthly --artifact github.com/earthly/earthly/examples/tutorial/python:main+part3/part3 ./part3
 ```
 
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM python:3
 WORKDIR /code
 

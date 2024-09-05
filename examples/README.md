@@ -21,6 +21,7 @@ If you are new to Earthly, you may find the [Basics tutorial](https://docs.earth
 Please note that these examples, although similar, are distinct from the ones used in the [tutorial](./tutorial).
 
 <!-- vale HouseStyle.Spelling = NO -->
+* [clojure](./clojure)
 * [cobol](./cobol)
 * [c](./c)
 * [cpp](./cpp)
@@ -29,6 +30,7 @@ Please note that these examples, although similar, are distinct from the ones us
 * [go](./go)
 * [java](./java)
 * [js](./js)
+* [next-js-netlify](./next-js-netlify)
 * [python](./python)
 * [ruby](./ruby)
 * [ruby-on-rails](./ruby-on-rails)
@@ -45,7 +47,7 @@ Please note that these examples, although similar, are distinct from the ones us
 
 ## Examples by Earthly features
 
-* [import](./import) - shows how to use the `IMPORT` command to alias project references.
+* [import](./import) - shows how to use the `IMPORT` command to alias Earthfile references.
 * [cutoff-optimization](./cutoff-optimization) - shows that if an intermediate artifact does not change, then the rest of the build will use the cache, even if the source has changed.
 * [multiplatform](./multiplatform) - shows how Earthly can execute builds and create images for multiple platforms, using QEMU emulation.
 * [multiplatform-cross-compile](./multiplatform-cross-compile) - shows has through the use of cross-compilation, you can create images for multiple platforms, without using QEMU emulation.
@@ -59,3 +61,12 @@ Please note that these examples, although similar, are distinct from the ones us
 
 * [readme](./readme) - some sample code we used in our README.
 * [tests](./tests) - a suite of tests Earthly uses to ensure that its features are working correctly.
+
+### Larger Examples And Community Examples
+
+* [Earthly, Rust, GoLang, NodeJS and GitHub Actions Example](https://github.com/earthly/earthly-vs-gha)
+* [Cloud Services In GoLang](https://github.com/earthly/cloud-services-example)
+* [Earthfile workshop Repo](https://github.com/earthly/workshop-2023-09-18)
+* [Python & C Example](https://github.com/earthly/pymerge)
+* [Python Docker Example](https://github.com/earthly/build-transpose/blob/main/Earthfile)
+* [Awesome Earthly - Community Examples](https://github.com/earthly/awesome-earthly)

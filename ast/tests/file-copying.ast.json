@@ -3,7 +3,7 @@
     {
       "command": {
         "args": [
-          "alpine:3.15"
+          "alpine:3.18"
         ],
         "name": "FROM"
       }
@@ -175,6 +175,7 @@
             "args": [
               "+setup-scratch"
             ],
+            "docs": "Note: This is a negative test (should fail).\n",
             "name": "FROM"
           }
         },
@@ -610,7 +611,7 @@
   ],
   "version": {
     "args": [
-      "0.6"
+      "0.8"
     ]
   }
 }

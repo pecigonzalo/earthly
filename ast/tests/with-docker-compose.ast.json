@@ -3,7 +3,17 @@
     {
       "command": {
         "args": [
-          "earthly/dind"
+          "DIND_IMAGE",
+          "=",
+          "earthly/dind:alpine-3.19-docker-25.0.5-r0"
+        ],
+        "name": "ARG"
+      }
+    },
+    {
+      "command": {
+        "args": [
+          "$DIND_IMAGE"
         ],
         "name": "FROM"
       }
@@ -96,6 +106,7 @@
               "=",
               "0"
             ],
+            "docs": "Index is used to create parallel tests.\n",
             "name": "ARG"
           }
         },
@@ -147,7 +158,7 @@
   ],
   "version": {
     "args": [
-      "0.6"
+      "0.8"
     ]
   }
 }

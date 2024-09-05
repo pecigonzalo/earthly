@@ -14,6 +14,11 @@ type Artifact struct {
 	Artifact string
 }
 
+// Clone returns a copy of the Artifact
+func (a Artifact) Clone() Artifact {
+	return a
+}
+
 // String returns a string representation of the Artifact.
 func (ea Artifact) String() string {
 	return fmt.Sprintf("%s%s", ea.Target.String(), path.Join("/", escapePlus(ea.Artifact)))
@@ -24,7 +29,7 @@ func (ea Artifact) StringCanonical() string {
 	return fmt.Sprintf("%s%s", ea.Target.StringCanonical(), path.Join("/", escapePlus(ea.Artifact)))
 }
 
-// ParseArtifact parses a string representation of a Artifact.
+// ParseArtifact parses a string representation of an Artifact.
 func ParseArtifact(artifactName string) (Artifact, error) {
 	parts, err := splitUnescapePlus(artifactName)
 	if err != nil {

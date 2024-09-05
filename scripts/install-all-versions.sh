@@ -15,7 +15,15 @@ os="linux"
 if [ "$(uname)" == "Darwin" ]; then
     os="darwin"
 fi
-release_name="earth\\(ly\\)\\?-$os-amd64"
+
+arch="$(uname -m)"
+if [ "$arch" == "aarch64" ]; then
+    arch="arm64"
+elif [ "$arch" == "x86_64" ]; then
+    arch="amd64"
+fi
+
+release_name="earth\\(ly\\)\\?-$os-$arch"
 
 curl -s -L "https://api.github.com/repos/earthly/earthly/releases" > "/tmp/releases.1"
 
@@ -32,6 +40,9 @@ fi
 
 releases=$(jq -r '.[] | @base64' < "/tmp/releases")
 
+outdir="$HOME/bin"
+mkdir -p "$outdir"
+
 for row in $releases; do
     version=$(echo "$row" | base64 -d | jq -r '.name')
     pattern="$version/$release_name"
@@ -41,7 +52,7 @@ for row in $releases; do
         if echo "$url" | grep -w "earth" >/dev/null; then
             earthlybin="earth"
         fi
-        outfile="$HOME/bin/$earthlybin-$version"
+        outfile="$outdir/$earthlybin-$version"
 
         if [ ! -f "$outfile" ]; then
             echo "Downloading $url to $outfile"

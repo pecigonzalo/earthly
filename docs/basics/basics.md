@@ -4,6 +4,12 @@ Earthly is a build automation tool that uses docker containers to enforce build 
 
 This tutorial will walk you through a basic example of using Earthly.
 
+## Earthly is better logged in
+
+A better, interactive version of this tutorial is available in Earthly Cloud. Get started with Earthly Cloud for free by visiting the [sign up](https://cloud.earthly.dev/login) page.
+
+## Table of Contents
+
 * **Introduction** <-- You are here.
 * [Part 1: A simple Earthfile](./part-1-a-simple-earthfile.md)
 * [Part 2: Outputs](./part-2-outputs.md)
@@ -11,6 +17,8 @@ This tutorial will walk you through a basic example of using Earthly.
 * [Part 4: Args](./part-4-args.md)
 * [Part 5: Importing](./part-5-importing.md)
 * [Part 6: Using Docker In Earthly](./part-6-using-docker-with-earthly.md)
+* [Part 7: Using remote runners](./part-7-using-remote-runners.md)
+* [Part 8: Using Earthly in CI](./part-8a-using-earthly-in-your-current-ci.md)
 * [Final words](./final-words.md)
 
 ## Installation

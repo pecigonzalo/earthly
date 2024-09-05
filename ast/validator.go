@@ -14,8 +14,9 @@ import (
 // consumable from other packages.
 var validEarthfileVersions = []string{
 	"0.0", // Meant only for testing/debugging. Disables all feature flags.
-	"0.5",
 	"0.6",
+	"0.7",
+	"0.8",
 }
 
 var errUnexpectedVersionArgs = fmt.Errorf("unexpected VERSION arguments; should be VERSION [flags] <major-version>.<minor-version>")
@@ -50,6 +51,19 @@ func validateAst(ef spec.Earthfile) error {
 	return nil
 }
 
+func getValidVersionsFormatted() string {
+	if validEarthfileVersions[0] != "0.0" {
+		panic("validEarthfileVersions should start with 0.0")
+	}
+	var sb strings.Builder
+	latestIndex := len(validEarthfileVersions) - 1
+	for i := 1; i < latestIndex; i++ {
+		sb.WriteString(validEarthfileVersions[i] + ", ")
+	}
+	sb.WriteString("or " + validEarthfileVersions[latestIndex])
+	return sb.String()
+}
+
 func validVersion(ef spec.Earthfile) []error {
 	var errs []error
 
@@ -76,7 +90,7 @@ func validVersion(ef spec.Earthfile) []error {
 	}
 
 	if !isVersionValid {
-		errs = append(errs, errors.Errorf("Earthfile version is invalid, supported versions are %v", validEarthfileVersions))
+		errs = append(errs, errors.Errorf("Earthfile version is invalid, supported versions are %v", getValidVersionsFormatted()))
 	}
 
 	return errs

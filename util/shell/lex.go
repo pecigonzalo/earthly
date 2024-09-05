@@ -36,8 +36,8 @@ func NewLex(escapeToken rune) *Lex {
 
 // ProcessWord will use the 'env' list of environment variables,
 // and replace any env var references in 'word'.
-func (s *Lex) ProcessWord(word string, env []string) (string, error) {
-	word, _, err := s.process(word, BuildEnvs(env))
+func (s *Lex) ProcessWord(word string, env []string, shelloutEnvs []string) (string, error) {
+	word, _, err := s.process(word, BuildEnvs(env), BuildShellOutEnvs(shelloutEnvs))
 	return word, err
 }
 
@@ -48,28 +48,29 @@ func (s *Lex) ProcessWord(word string, env []string) (string, error) {
 // this splitting is done **after** the env var substitutions are done.
 // Note, each one is trimmed to remove leading and trailing spaces (unless
 // they are quoted", but ProcessWord retains spaces between words.
-func (s *Lex) ProcessWords(word string, env []string) ([]string, error) {
-	_, words, err := s.process(word, BuildEnvs(env))
+func (s *Lex) ProcessWords(word string, env []string, shelloutEnvs []string) ([]string, error) {
+	_, words, err := s.process(word, BuildEnvs(env), BuildShellOutEnvs(shelloutEnvs))
 	return words, err
 }
 
 // ProcessWordWithMap will use the 'env' list of environment variables,
 // and replace any env var references in 'word'.
-func (s *Lex) ProcessWordWithMap(word string, env map[string]string) (string, error) {
-	word, _, err := s.process(word, env)
+func (s *Lex) ProcessWordWithMap(word string, env map[string]string, shelloutEnvs map[string]struct{}) (string, error) {
+	word, _, err := s.process(word, env, shelloutEnvs)
 	return word, err
 }
 
 // ProcessWordsWithMap will use the 'env' list of environment variables,
 // and replace any env var references in 'word'.
-func (s *Lex) ProcessWordsWithMap(word string, env map[string]string) ([]string, error) {
-	_, words, err := s.process(word, env)
+func (s *Lex) ProcessWordsWithMap(word string, env map[string]string, shelloutEnvs map[string]struct{}) ([]string, error) {
+	_, words, err := s.process(word, env, shelloutEnvs)
 	return words, err
 }
 
-func (s *Lex) process(word string, env map[string]string) (string, []string, error) {
+func (s *Lex) process(word string, env map[string]string, shelloutEnvs map[string]struct{}) (string, []string, error) {
 	sw := &shellWord{
 		envs:              env,
+		shellOutEnvs:      shelloutEnvs,
 		escapeToken:       s.escapeToken,
 		skipUnsetEnv:      s.SkipUnsetEnv,
 		skipProcessQuotes: s.SkipProcessQuotes,
@@ -90,6 +91,7 @@ var ErrNoShellOut = errors.New("shelling out is not available")
 type shellWord struct {
 	scanner           scanner.Scanner
 	envs              map[string]string
+	shellOutEnvs      map[string]struct{}
 	escapeToken       rune
 	rawQuotes         bool
 	rawEscapes        bool
@@ -326,9 +328,7 @@ func (sw *shellWord) processDoubleQuoteIgnoringDollar() (string, error) {
 		default:
 			ch := sw.scanner.Next()
 			if ch == sw.escapeToken {
-				if sw.rawEscapes {
-					result.WriteRune(ch)
-				}
+				result.WriteRune(ch)
 
 				switch sw.scanner.Peek() {
 				case scanner.EOF:
@@ -355,9 +355,7 @@ func (sw *shellWord) processDollar() (string, error) {
 	switch peek {
 	case '(':
 		sw.scanner.Next()
-		//return sw.processDollarShellOut()
-		shout, err := sw.processDollarShellOut()
-		return shout, err
+		return sw.processDollarShellOut()
 	case '{':
 		sw.scanner.Next()
 		return sw.processDollarCurlyBracket()
@@ -367,34 +365,51 @@ func (sw *shellWord) processDollar() (string, error) {
 		if name == "" {
 			return "$", nil
 		}
-		value, found := sw.getEnv(name)
+		value, err := sw.getEnv(name)
+		var found bool
+		switch err {
+		case nil:
+			found = true
+		case errEnvNotFound:
+			break
+		default:
+			return "", err
+		}
 		if !found && sw.skipUnsetEnv {
 			return "$" + name, nil
 		}
 		return value, nil
 	}
 }
+
 func (sw *shellWord) processDollarShellOut() (string, error) {
 	var result bytes.Buffer
+
+	oldRawQuotes := sw.rawQuotes
+	sw.rawQuotes = true
+	defer func() { sw.rawQuotes = oldRawQuotes }()
 
 	seenParentheses := 1
 	escaped := false
 	for {
-		ch := sw.scanner.Next()
+		ch := sw.scanner.Peek()
 		if ch == scanner.EOF {
 			return "", errors.New("syntax error: missing ')'")
 		}
 		if escaped {
 			escaped = false
+			ch = sw.scanner.Next()
 			result.WriteRune(ch)
 			continue
 		}
 		switch ch {
 		case '\\':
 			escaped = true
+			_ = sw.scanner.Next()
 			continue
 		case ')':
 			seenParentheses--
+			ch = sw.scanner.Next()
 			if seenParentheses == 0 {
 				command := result.String()
 				if sw.shellOut == nil {
@@ -405,20 +420,24 @@ func (sw *shellWord) processDollarShellOut() (string, error) {
 			result.WriteRune(ch)
 		case '(':
 			seenParentheses++
+			ch = sw.scanner.Next()
 			result.WriteRune(ch)
 		case '\'':
+			// processDollarShellOut will call Next()
 			s, err := sw.processSingleQuote()
 			if err != nil {
 				return "", err
 			}
 			result.WriteString(s)
 		case '"':
+			_ = sw.scanner.Next()
 			s, err := sw.processDoubleQuoteIgnoringDollar()
 			if err != nil {
 				return "", err
 			}
 			result.WriteString(s)
 		default:
+			ch = sw.scanner.Next()
 			result.WriteRune(ch)
 		}
 	}
@@ -437,7 +456,16 @@ func (sw *shellWord) processDollarCurlyBracket() (string, error) {
 	switch ch {
 	case '}':
 		// Normal ${xx} case
-		value, found := sw.getEnv(name)
+		value, err := sw.getEnv(name)
+		var found bool
+		switch err {
+		case nil:
+			found = true
+		case errEnvNotFound:
+			break
+		default:
+			return "", err
+		}
 		if !found && sw.skipUnsetEnv {
 			return fmt.Sprintf("${%s}", name), nil
 		}
@@ -450,7 +478,16 @@ func (sw *shellWord) processDollarCurlyBracket() (string, error) {
 			}
 			return "", err
 		}
-		newValue, found := sw.getEnv(name)
+		newValue, err := sw.getEnv(name)
+		var found bool
+		switch err {
+		case nil:
+			found = true
+		case errEnvNotFound:
+			break
+		default:
+			return "", err
+		}
 		if !found {
 			if sw.skipUnsetEnv {
 				return fmt.Sprintf("${%s?%s}", name, word), nil
@@ -460,6 +497,62 @@ func (sw *shellWord) processDollarCurlyBracket() (string, error) {
 				message = word
 			}
 			return "", errors.Errorf("%s: %s", name, message)
+		}
+		return newValue, nil
+	case '%':
+		word, _, err := sw.processStopOn('}')
+		if err != nil {
+			if sw.scanner.Peek() == scanner.EOF {
+				return "", errors.New("syntax error: missing '}'")
+			}
+			return "", err
+		}
+		newValue, err := sw.getEnv(name)
+		var found bool
+		switch err {
+		case nil:
+			found = true
+		case errEnvNotFound:
+			break
+		default:
+			return "", err
+		}
+		if !found && sw.skipUnsetEnv {
+			return fmt.Sprintf("${%s%%%s}", name, word), nil
+		}
+		if len(word) > len(newValue) {
+			return newValue, nil
+		}
+		if newValue[len(newValue)-len(word):] == word {
+			return newValue[:len(newValue)-len(word)], nil
+		}
+		return newValue, nil
+	case '#':
+		word, _, err := sw.processStopOn('}')
+		if err != nil {
+			if sw.scanner.Peek() == scanner.EOF {
+				return "", errors.New("syntax error: missing '}'")
+			}
+			return "", err
+		}
+		newValue, err := sw.getEnv(name)
+		var found bool
+		switch err {
+		case nil:
+			found = true
+		case errEnvNotFound:
+			break
+		default:
+			return "", err
+		}
+		if !found && sw.skipUnsetEnv {
+			return fmt.Sprintf("${%s#%s}", name, word), nil
+		}
+		if len(word) > len(newValue) {
+			return newValue, nil
+		}
+		if newValue[0:len(word)] == word {
+			return newValue[len(word):], nil
 		}
 		return newValue, nil
 	case ':':
@@ -476,8 +569,17 @@ func (sw *shellWord) processDollarCurlyBracket() (string, error) {
 		}
 
 		// Grab the current value of the variable in question so we
-		// can use to to determine what to do based on the modifier
-		newValue, found := sw.getEnv(name)
+		// can use it to determine what to do based on the modifier
+		newValue, err := sw.getEnv(name)
+		var found bool
+		switch err {
+		case nil:
+			found = true
+		case errEnvNotFound:
+			break
+		default:
+			return "", err
+		}
 
 		switch modifier {
 		case '+':
@@ -567,13 +669,21 @@ func isSpecialParam(char rune) bool {
 	return false
 }
 
-func (sw *shellWord) getEnv(name string) (string, bool) {
+var errEnvNotFound = errors.New("env not found")
+
+func (sw *shellWord) getEnv(name string) (string, error) {
 	for key, value := range sw.envs {
 		if EqualEnvKeys(name, key) {
-			return value, true
+			return value, nil
 		}
 	}
-	return "", false
+
+	_, isShellOutEnv := sw.shellOutEnvs[name]
+	if isShellOutEnv && sw.shellOut != nil {
+		return sw.shellOut(fmt.Sprintf("echo $%s", name))
+	}
+
+	return "", errEnvNotFound
 }
 
 // BuildEnvs takes a list of envs and converts it to a map
@@ -595,4 +705,13 @@ func BuildEnvs(env []string) map[string]string {
 	}
 
 	return envs
+}
+
+// BuildShellOutEnvs takes a list of shellOutEnvs and converts it to a map
+func BuildShellOutEnvs(shellOutEnvs []string) map[string]struct{} {
+	m := map[string]struct{}{}
+	for _, s := range shellOutEnvs {
+		m[s] = struct{}{}
+	}
+	return m
 }

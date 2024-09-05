@@ -13,9 +13,9 @@ import (
 type Settings struct {
 	CacheSizeMb          int
 	CacheSizePct         int
+	CacheKeepDuration    int
 	Debug                bool
 	BuildkitAddress      string
-	DebuggerAddress      string
 	LocalRegistryAddress string
 	AdditionalArgs       []string
 	AdditionalConfig     string
@@ -32,8 +32,10 @@ type Settings struct {
 	IPTables             string
 	MaxParallelism       int
 	SatelliteName        string `hash:"ignore"`
+	SatelliteDisplayName string `hash:"ignore"`
 	SatelliteOrgID       string `hash:"ignore"`
 	SatelliteToken       string `hash:"ignore"`
+	SatelliteIsManaged   bool   `hash:"ignore"`
 	EnableProfiler       bool
 	NoUpdate             bool   `hash:"ignore"`
 	StartUpLockPath      string `hash:"ignore"`
@@ -62,4 +64,9 @@ func (s Settings) VerifyHash(hash string) (bool, error) {
 	}
 
 	return oldHash == newHash, nil
+}
+
+// HasConfiguredCacheSize returns if the buildkitd cache size was configured
+func (s Settings) HasConfiguredCacheSize() bool {
+	return s.CacheSizeMb > 0 || s.CacheSizePct > 0
 }

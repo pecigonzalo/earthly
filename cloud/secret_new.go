@@ -2,12 +2,12 @@ package cloud
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	secretsapi "github.com/earthly/cloud-api/secrets"
-	"github.com/golang/protobuf/jsonpb"
 	"github.com/pkg/errors"
 )
 
@@ -30,7 +30,7 @@ type SecretPermission struct {
 }
 
 // ListSecrets returns a list of secrets base on the given path.
-func (c *client) ListSecrets(ctx context.Context, path string) ([]*Secret, error) {
+func (c *Client) ListSecrets(ctx context.Context, path string) ([]*Secret, error) {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -48,7 +48,7 @@ func (c *client) ListSecrets(ctx context.Context, path string) ([]*Secret, error
 	var secrets []*Secret
 
 	res := &secretsapi.ListSecretsResponse{}
-	err = jsonpb.UnmarshalString(body, res)
+	err = c.jum.Unmarshal(body, res)
 	if err != nil {
 		return nil, err
 	}
@@ -65,14 +65,62 @@ func (c *client) ListSecrets(ctx context.Context, path string) ([]*Secret, error
 	return secrets, nil
 }
 
+// GetProjectSecret gets a secret from a project secret store
+func (c *Client) GetProjectSecret(ctx context.Context, org, project, secretName string) (*Secret, error) {
+	if org == "" {
+		return nil, fmt.Errorf("GetProjectSecret called with empty org")
+	}
+	if project == "" {
+		return nil, fmt.Errorf("GetProjectSecret called with empty project")
+	}
+	if secretName == "" {
+		return nil, fmt.Errorf("GetProjectSecret called with empty secretName")
+	}
+	return c.getSecretV2(ctx, fmt.Sprintf("/%s/%s/%s", org, project, secretName))
+}
+
+// GetUserSecret gets a secret from the current user's personal secret store
+func (c *Client) GetUserSecret(ctx context.Context, secretName string) (*Secret, error) {
+	if secretName == "" {
+		return nil, fmt.Errorf("GetUserSecret called with empty secretName")
+	}
+	return c.getSecretV2(ctx, fmt.Sprintf("/user/%s", secretName))
+}
+
+// GetUserOrProjectSecret gets a secret from a project or the current user's personal secret store,
+// depending on the path being structured as /org/project/... or /user/... respectively.
+func (c *Client) GetUserOrProjectSecret(ctx context.Context, path string) (*Secret, error) {
+	if !strings.HasPrefix(path, "/") {
+		return nil, ErrMalformedSecretPath
+	}
+	// path must be /user/..., or /org/project/...
+	if !strings.HasPrefix(path, "/user/") && strings.Count(path, "/") < 3 {
+		return nil, ErrMalformedSecretPath
+	}
+	return c.getSecretV2(ctx, path)
+}
+
+func (c *Client) getSecretV2(ctx context.Context, path string) (*Secret, error) {
+	res, err := c.ListSecrets(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	for _, sec := range res {
+		if sec.Path == path {
+			return sec, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 // SetSecret adds or updates the given path and secret combination.
-func (c *client) SetSecret(ctx context.Context, path string, secret []byte) error {
+func (c *Client) SetSecret(ctx context.Context, path string, secret []byte) error {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
 	u := "/api/v1/secrets" + path
 
-	status, body, err := c.doCall(ctx, http.MethodPut, u, withAuth(), withBody(string(secret)))
+	status, body, err := c.doCall(ctx, http.MethodPut, u, withAuth(), withBody(secret))
 	if err != nil {
 		return err
 	}
@@ -85,7 +133,7 @@ func (c *client) SetSecret(ctx context.Context, path string, secret []byte) erro
 }
 
 // RemoveSecret deletes a secret by path name.
-func (c *client) RemoveSecret(ctx context.Context, path string) error {
+func (c *Client) RemoveSecret(ctx context.Context, path string) error {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -96,7 +144,12 @@ func (c *client) RemoveSecret(ctx context.Context, path string) error {
 		return err
 	}
 
-	if status != http.StatusOK {
+	switch status {
+	case http.StatusOK:
+		break
+	case http.StatusNotFound:
+		return ErrNotFound
+	default:
 		return errors.Errorf("failed to delete secret: %s", body)
 	}
 
@@ -104,7 +157,7 @@ func (c *client) RemoveSecret(ctx context.Context, path string) error {
 }
 
 // ListSecretPermissions returns a set of user permissions for project secrets.
-func (c *client) ListSecretPermissions(ctx context.Context, path string) ([]*SecretPermission, error) {
+func (c *Client) ListSecretPermissions(ctx context.Context, path string) ([]*SecretPermission, error) {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -122,7 +175,7 @@ func (c *client) ListSecretPermissions(ctx context.Context, path string) ([]*Sec
 	var secretPerms []*SecretPermission
 
 	res := &secretsapi.ListSecretPermissionsResponse{}
-	err = jsonpb.UnmarshalString(body, res)
+	err = c.jum.Unmarshal(body, res)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +194,7 @@ func (c *client) ListSecretPermissions(ctx context.Context, path string) ([]*Sec
 }
 
 // SetSecretPermission is used to set a user permission on a given secret path.
-func (c *client) SetSecretPermission(ctx context.Context, path, userEmail, permission string) error {
+func (c *Client) SetSecretPermission(ctx context.Context, path, userEmail, permission string) error {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -165,7 +218,7 @@ func (c *client) SetSecretPermission(ctx context.Context, path, userEmail, permi
 }
 
 // RemoveSecretPermission removes a secret permission for the user and path.
-func (c *client) RemoveSecretPermission(ctx context.Context, path, userEmail string) error {
+func (c *Client) RemoveSecretPermission(ctx context.Context, path, userEmail string) error {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}

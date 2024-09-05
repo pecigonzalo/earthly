@@ -2,6 +2,7 @@ package autocomplete
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/user"
 	"path"
@@ -19,15 +20,9 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-func trimFlag(prefix string) (string, bool) {
-	if len(prefix) == 1 && prefix[0] == '-' {
-		return "", true
-	}
-	if strings.HasPrefix(prefix, "--") {
-		return prefix[2:], true
-	}
-	return "", false
-}
+var (
+	errCompPointOutOfBounds = fmt.Errorf("COMP_POINT out of bounds")
+)
 
 func isLocalPath(path string) bool {
 	for _, prefix := range []string{".", "..", "/", "~"} {
@@ -224,7 +219,7 @@ func getPotentialPaths(ctx context.Context, resolver *buildcontext.Resolver, gwC
 	return paths, nil
 }
 
-func getPotentialBuildArgs(ctx context.Context, resolver *buildcontext.Resolver, gwClient gwclient.Client, targetStr string) ([]string, error) {
+func getPotentialTargetBuildArgs(ctx context.Context, resolver *buildcontext.Resolver, gwClient gwclient.Client, targetStr string) ([]string, error) {
 	target, err := domain.ParseTarget(targetStr)
 	if err != nil {
 		return nil, err
@@ -234,6 +229,14 @@ func getPotentialBuildArgs(ctx context.Context, resolver *buildcontext.Resolver,
 		return nil, err
 	}
 	return envArgs, nil
+}
+
+func getPotentialArtifactBuildArgs(ctx context.Context, resolver *buildcontext.Resolver, gwClient gwclient.Client, artifactStr string) ([]string, error) {
+	artifact, err := domain.ParseArtifact(artifactStr)
+	if err != nil {
+		return nil, err
+	}
+	return getPotentialTargetBuildArgs(ctx, resolver, gwClient, artifact.Target.String())
 }
 
 // isVisibleFlag returns if a flag is hidden or not
@@ -333,15 +336,92 @@ const (
 	commandState                        // 4
 	targetState                         // 5
 	targetFlagState                     // 6
-	endOfSuggestionsState               // 7
+	artifactFlagState                   // 7
+	endOfSuggestionsState               // 8
 )
+
+type FlagValuePotentialFn func(ctx context.Context, prefix string) []string
 
 // GetPotentials returns a list of potential arguments for shell auto completion
 // NOTE: you can cause earthly to run this command with:
-//       COMP_LINE="earthly -" COMP_POINT=$(echo -n $COMP_LINE | wc -c) go run cmd/earthly/main.go
-func GetPotentials(ctx context.Context, resolver *buildcontext.Resolver, gwClient gwclient.Client, compLine string, compPoint int, app *cli.App) ([]string, error) {
+//
+//	COMP_LINE="earthly -" COMP_POINT=$(echo -n $COMP_LINE | wc -c) go run cmd/earthly/main.go
+func GetPotentials(ctx context.Context, resolver *buildcontext.Resolver, gwClient gwclient.Client, compLine string, compPoint int, app *cli.App, cloudClient cloudListClient) ([]string, error) {
+	if compPoint > len(compLine) {
+		return nil, errCompPointOutOfBounds
+	}
 	compLine = compLine[:compPoint]
 	subCommands := app.Commands
+
+	// TODO all the urfave/cli commands need to be moved out of the main package
+	// so they could be directly referenced rather than storing a list of strings of seen commands
+	commandValues := []string{}
+	getPrevCommand := func() string {
+		n := len(commandValues) - 2
+		if n >= 0 {
+			return commandValues[n]
+		}
+		return ""
+	}
+
+	flagValues := map[string]string{}
+	flagValuePotentialFuncs := map[string]FlagValuePotentialFn{
+		"--org": func(ctx context.Context, prefix string) []string {
+			if cloudClient == nil {
+				return []string{}
+			}
+
+			orgs, err := cloudClient.ListOrgs(ctx)
+			if err != nil {
+				return []string{}
+			}
+			potentials := []string{}
+			for _, org := range orgs {
+				potentials = append(potentials, org.Name)
+			}
+			return potentials
+		},
+		"--project": func(ctx context.Context, prefix string) []string {
+			if cloudClient == nil {
+				return []string{}
+			}
+
+			org, ok := flagValues["--org"]
+			if !ok {
+				return []string{}
+			}
+
+			projects, err := cloudClient.ListProjects(ctx, org)
+			if err != nil {
+				return []string{}
+			}
+			potentials := []string{}
+			for _, project := range projects {
+				potentials = append(potentials, project.Name)
+			}
+			return potentials
+		},
+		"--satellite": func(ctx context.Context, prefix string) []string {
+			if cloudClient == nil {
+				return []string{}
+			}
+
+			org, ok := flagValues["--org"]
+			if !ok {
+				return []string{}
+			}
+
+			satellites, err := cloudClient.ListSatellites(ctx, org)
+			if err != nil {
+				return []string{}
+			}
+			potentials := []string{}
+			for _, sat := range satellites {
+				potentials = append(potentials, sat.Name)
+			}
+			return potentials
+		},
+	}
 
 	// getWord returns the next word and a boolean if it is valid
 	// TODO this function does not handle escaped space, e.g.
@@ -368,6 +448,8 @@ func GetPotentials(ctx context.Context, resolver *buildcontext.Resolver, gwClien
 
 	state := rootState
 	var target string
+	var artifactMode bool
+	var flag string
 
 	var cmd *cli.Command
 	getFlags := func() []cli.Flag {
@@ -384,14 +466,19 @@ func GetPotentials(ctx context.Context, resolver *buildcontext.Resolver, gwClien
 		}
 
 		if state == flagValueState {
+			flagValues[flag] = prevWord
 			prevWord = ""
 			state = flagState
 		}
 
 		if state == flagState && isFlagValidAndRequiresValue(getFlags(), prevWord) {
 			state = flagValueState
+			flag = prevWord
 		} else if state == rootState || state == commandState || state == flagState {
 			if strings.HasPrefix(w, "-") {
+				if w == "-a" || w == "--artifact" {
+					artifactMode = true
+				}
 				state = flagState
 			} else {
 				// targets only work under the root command
@@ -404,6 +491,9 @@ func GetPotentials(ctx context.Context, resolver *buildcontext.Resolver, gwClien
 					if foundCmd != nil {
 						subCommands = foundCmd.Subcommands
 						cmd = foundCmd
+
+						// TODO once urfave/cli commands are moved out of main, this should be removed (and instead the cmd pointer could simply be compared to determine which command we are referencing)
+						commandValues = append(commandValues, cmd.Name)
 					}
 					state = commandState
 				}
@@ -415,7 +505,11 @@ func GetPotentials(ctx context.Context, resolver *buildcontext.Resolver, gwClien
 				if strings.HasSuffix(w, "=") {
 					state = endOfSuggestionsState
 				} else {
-					state = targetFlagState
+					if artifactMode {
+						state = artifactFlagState
+					} else {
+						state = targetFlagState
+					}
 				}
 			}
 		}
@@ -436,10 +530,20 @@ func GetPotentials(ctx context.Context, resolver *buildcontext.Resolver, gwClien
 		}
 		potentials = padStrings(potentials, "--", " ")
 
+	case flagValueState:
+		if fn, ok := flagValuePotentialFuncs[flag]; ok {
+			potentials = append(potentials, fn(ctx, prevWord)...)
+		}
+
 	case rootState, commandState:
 		if cmd != nil {
 			potentials = getVisibleCommands(cmd.Subcommands)
 			potentials = padStrings(potentials, "", " ")
+
+			// TODO this should be tied to the instance of the command (and not just command Name value); but that means moving lots out of the main package
+			if getPrevCommand() == "satellite" && (cmd.Name == "inspect" || cmd.Name == "rm" || cmd.Name == "select" || cmd.Name == "sleep" || cmd.Name == "update" || cmd.Name == "wake") {
+				potentials = append(potentials, flagValuePotentialFuncs["--satellite"](ctx, "")...)
+			}
 		} else {
 			potentials = getVisibleCommands(app.Commands)
 			potentials = padStrings(potentials, "", " ")
@@ -460,7 +564,15 @@ func GetPotentials(ctx context.Context, resolver *buildcontext.Resolver, gwClien
 
 	case targetFlagState:
 		var err error
-		potentials, err = getPotentialBuildArgs(ctx, resolver, gwClient, target)
+		potentials, err = getPotentialTargetBuildArgs(ctx, resolver, gwClient, target)
+		if err != nil {
+			return nil, err
+		}
+		potentials = padStrings(potentials, "--", "=")
+
+	case artifactFlagState:
+		var err error
+		potentials, err = getPotentialArtifactBuildArgs(ctx, resolver, gwClient, target)
 		if err != nil {
 			return nil, err
 		}

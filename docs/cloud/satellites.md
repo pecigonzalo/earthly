@@ -1,90 +1,55 @@
 # Earthly Satellites
 
-This feature is part of the Earthly Satellites paid plan.
+Earthly Satellites are [remote runners](../remote-runners.md) that work seamlessly with Earthly, using persistent cache to improve build times.
+Satellites can be either [fully managed](https://earthly.dev/earthly-satellites) by Earthly Cloud or [self-hosted](./satellites/self-hosted.md) in your own environment.
 
-{% hint style='danger' %}
-##### Important
+## Get started with Earthly Cloud Satellites for free!
 
-This feature is currently in **Beta** stage
-
-* The feature may break or change significantly in future versions of Earthly.
-* Give us feedback on
-  * [Slack](https://earthly.dev/slack)
-  * [GitHub issues](https://github.com/earthly/earthly/issues)
-  * [Emailing support](mailto:support+satellite@earthly.dev)
-{% endhint %}
-
-Earthly Satellites are remote Buildkit instances managed by the Earthly team. They allow you to perform builds in the cloud, while retaining cache between runs.
-
-When using Earthly Satellites, even though the build executes remotely, the following pieces of functionality are still available:
-
-* Build logs are streamed to your local machine in real-time, just as if you were running the build locally
-* Outputs (images and artifacts) resulting from the build, if any, are transferred back to your local machine
-* Commands under `LOCALLY` execute on your local machine
-* Secrets available locally, including Docker/Podman credentials are passed to the satellite whenever needed by the build
-* Any images to be pushed are pushed directly from the satellite, using any Docker/Podman credentials available on the local system.
-
-![Satellite workflow](./img/satellite-workflow.png)
-
-Earthly Satellite instances come with their own cache volume. This means that performing builds repeatedly on the same satellite will result in faster builds. This can be especially useful when using Satellites from a sandboxed CI environment, where cache from previous builds would not otherwise be available. Below is a comparison with Earthly's [Shared remote cache features](../guides/shared-cache.md).
-
-| Cache characteristic | Satellite | Shared Cache |
-| --- | --- | --- |
-| Storage location | Satellite | A container registry of your choice |
-| Proximity to compute | ✅ Same machine | ❌ Performing upload/download is required |
-| Just works, no configuration necessary | ✅ Yes | ❌ Requires experimentation with the various settings |
-| Concurrent access | ✅ Yes | 🟡 Concurrent read access only |
-| Retains entire cache of the build | ✅ Yes | ❌ Usually no, due to prohibitive upload time |
-| Retains cache for multiple historical builds | ✅ Yes | ❌ No, only one build retained |
-| Cache mounts (`RUN --mount type=cache` and `CACHE`) included | ✅ Yes | ❌ No |
+Fully managed Satellites are included with [Earthly Cloud](https://docs.earthly.dev/earthly-cloud/overview). Earthly Cloud is a SaaS build automation platform with consistent builds, ridiculous speed, and a next-gen developer experience that works seamlessly with any CI. *Get 6,000 build minutes/month as part of Earthly Cloud's no time limit free tier.* ***[Sign up today](https://cloud.earthly.dev/login).***
 
 ## Benefits
 
 Typical use cases for Earthly Satellites include:
 
-* Speeding up CI builds in sandboxed CI environments such as GitHub Actions, GitLab, CircleCI, and others. Most CI build times are improved by 20-80% via Satellites.
-* Executing builds on AMD64/Intel architecture natively when working from an Apple Silicon machine (Apple M1/M2).
-* Sharing compute and cache with coworkers or with the CI.
-* Benefiting from high-bandwidth internet access from the satellite, thus allowing for fast downloads of dependencies and fast pushes for deployments. This is particularly useful if operating from a location with slow internet.
-* Using Earthly in environments where privileged access or docker-in-docker are not supported.
+* **Speeding up CI builds** in sandboxed CI environments such as GitHub Actions, GitLab, CircleCI, and others. Most CI build times are improved by 2-20X with Satellites.
+* **Sharing compute and cache with coworkers** or with the CI.
+* **Executing cross-platform builds natively**. For example, executing builds on x86 architecture natively when you are working from an Apple Silicon machine (Apple M1/M2) and vice versa, arm64 builds from an x86 machine.
+* **Benefiting from high-bandwidth internet access** from the satellite, allowing for fast downloads of dependencies and pushes for deployments. This is particularly useful if you are in a location with slow internet.
+* **Using Earthly in restricted environments**, where privileged access or docker-in-docker are not supported.
 
-## Security
+## How Earthly Satellites work
 
-As builds often handle sensitive pieces of data, Satellites are designed with security in mind. Here are some of Earthly's security considerations:
+### On your laptop
 
-* Satellite instances run in isolated VMs, with restricted local networking, and are only accessible by users you invite onto the platform.
-* Network communication and data at rest is secured using industry state of the art practices.
-* The cache is not shared between satellites.
-* Secrets used as part of the build are only kept in-memory temporarily, unless they are part of the [Earthly Cloud Secrets storage](./cloud-secrets.md), in which case they are encrypted at rest.
-* In addition, Earthly is pursuing SOC 2 compliance. SOC 2 Type I ETA Fall 2022, SOC 2 Type II ETA Summer 2023.
-* To read more about Earthly's security practices please see the [Security page](https://earthly.dev/security).
+* You kick off the build from the command line, and Earthly uses a remote satellite for execution.
+* The source files used are the ones you have locally in the current directory.
+* The build logs from the satellite are streamed back to your terminal in real time, so you can see the progress of the build.
+* The outputs of the build - images and artifacts - are downloaded back to your local machine upon success.
+* Everything looks and feels as if it is executing on your computer in your terminal.
+* In reality, the execution takes place in the cloud with high parallelism and a lot of caching.
+
+### In your CI of choice
+
+* The CI starts a build and invokes Earthly.
+* Earthly starts the build on a remote satellite, executing each step in isolated containers.
+* The same cache is used between runs on the same satellite, so parts that haven’t changed do not repeat.
+* Logs are streamed back to the CI in real time.
+* Any images, artifacts, or deployments that need to be pushed as part of the build are pushed directly from the satellite.
+* Build pass/fail is returned as an exit code, so your CI can report the status accordingly.
 
 ## Getting started
 
-### 1. Register an account and create an org
+### 1. Sign up for Earthly Cloud (free)
 
-Follow the steps in the [Earthly Cloud overview](./overview.md#getting-started) to register an account and create an org.
+Earthly Satellites is part of Earthly Cloud. You can use it for free as part of our free tier. Get started with Earthly Cloud by visiting the [sign up](https://cloud.earthly.dev/login) page, and get 6,000 build minutes/month for free.
 
-### 2. Request access
+### 2. Launch a new satellite
 
-Satellites is currently a private beta feature. Please [contact us](mailto:support+satellite@earthly.dev) to join the beta. Please mention your org name when requesting access.
+Satellites are launched in one of the following two ways, depending on which kind of satellite you intend on creating.
 
-### 3. Ensure that you have the latest version of Earthly
+#### Earthly Cloud
 
-Because this feature is under heavy development right now, it is very important that you use the latest version of Earthly available.
-
-**On Linux**, simply repeat the [installation steps](https://earthly.dev/get-earthly) to upgrade.
-
-**On Mac**, you can perform:
-
-```bash
-brew update
-brew upgrade earthly/earthly/earthly
-```
-
-### 4. Launch a new satellite
-
-To launch a new satellite, run:
+To launch a new managed Satellite on Earthly Cloud, run:
 
 ```bash
 earthly sat launch <satellite-name>
@@ -92,15 +57,20 @@ earthly sat launch <satellite-name>
 
 The Satellite name can be any arbitrary string.
 
-If you are part of multiple Earthly organizations, you may have to specify the org name under which you would like to launch the satellite:
+If you are part of multiple Earthly organizations, you may want to first select the org under which you would like to launch the satellite:
 
 ```bash
-earthly sat --org <org-name> launch <satellite-name>
+earthly org select <org-name>
+earthly sat launch <satellite-name>
 ```
 
 Once the satellite is created it will be automatically selected for use as part of your builds. The selection takes place by Earthly adding some information in your Earthly config file (usually located under `~/.earthly/config.yml`).
 
-### 5. Run a build
+#### Self-Hosted
+
+Self-Hosted Satellites are instead launched by running the satellite container directly. See the [self-hosted guide](./satellites/self-hosted.md) for instructions.
+
+### 3. Run a build
 
 To execute a build using the newly created satellite, simply run Earthly like you always have. For example:
 
@@ -134,19 +104,17 @@ Conversely, if a satellite is currently selected, but you want to execute a buil
 earthly --no-sat +my-target
 ```
 
-For more information on using satellites, see the [Using satellites page](../satellites/using.md).
+For more information on using satellites, see the [Using satellites page](./satellites/using.md).
 
-### 6. Invite your team
+### 4. Invite your team
 
-A final optional step is to invite your team to use the satellite. This can be done by running:
+A final step is to invite your team to use the satellite. This can be done by running:
 
 ```bash
-earthly org invite /<org-name>/ <email>
+earthly org invite <email>
 ```
 
-Note the slashes around the org name. Also, please note that **the user must have an account on Earthly before they can be invited**. (This is a temporary limitation which will be addressed in the future.)
-
-Once a user has been invited, you can forward them a link to the page [Using Satellites](./using.md) for them to get started.
+Once a user has been invited, you can forward them a link to the page [Using Satellites](./satellites/using.md) for them to get started.
 
 ## Managing Satellites
 
@@ -154,12 +122,8 @@ For more information on managing satellites, see the [Managing Satellites page](
 
 ## Satellite specs
 
-Satellites are currently only available in one size, and it has the following specs:
-
-* 4 CPUs
-* 16 GB of RAM
-* 90 GB of cache storage
-* 5 Gib internet bandwidth
+When using Cloud Satellites, the size and architecture can be specified at launch time using the `--size` and `--platform` flags.
+For the full list of supported options, please see the [Pricing Page](https://earthly.dev/pricing).
 
 ## Using Satellites in CI
 
@@ -168,7 +132,7 @@ A key benefit of using satellites in a CI environment is that the cache is share
 {% hint style='danger' %}
 ##### Note
 
-If a satellite is shared between multiple CI pipelines, it is possible that it becomes overloaded by too many parallel builds. For best performance, you can create a dedicated satellite for each CI pipeline.
+If a satellite is shared between multiple CI pipelines, it is possible that it becomes overloaded by too many parallel builds. For best performance, you can create a dedicated satellite for each CI pipeline. See the [best practices guide](./satellites/best-practices.md) for more details.
 {% endhint %}
 
 To get started with using Earthly Satellites in CI, you can create a login token for access.
@@ -183,23 +147,27 @@ to create your login token.
 
 Copy and paste the value into an environment variable called `EARTHLY_TOKEN` in your CI environment.
 
-Then as part of your CI script, just run
+Then as part of your CI script, simply select your satellite using one of these supported methods
 
-```bash
-earthly sat select <satellite-name>
-```
+* Selection command: `earthly sat select <satellite-name>`
+* Setellite flag: `earthly --sat my-satellite +build`
+* Environment variable: `EARTHLY_SATELLITE=my-satellite`
 
 before running your Earthly targets.
 
+Note that when using [Self-Hosted Satelites](./satellites/self-hosted.md), your CI runner must be able to access the satellite on the network where it is hosted.
+
+{% hint style='danger' %}
+##### Registry Login
+
+It's best to avoid using an image registry like Dockerhub without authentication, since the IP address from the satellite easily become rate-limited.
+A simple `docker login` command before running your build should be used to pass registry credentials to your satellite.
+See our [Docker authentication](../guides/auth.md) guide for more details.
+
+{% endhint %}
+
 ## Known limitations
 
-* Satellites currently require a manual re-launch in order to get updated to the latest version available.
-  ```bash
-  earthly sat rm <satellite-name>
-  earthly sat launch <satellite-name>
-  ```
-* The output phase (the phase in which a satellite outputs build results back to the local machine) is slower than it could be. To work around this issue, you can make use of the `--no-output` flag (assuming that local outputs are not needed). You can even use `--no-ouptut` in conjunction with `--push`. We are working on ways in which local outputs can be synchronized more intelligently such that only a diff is transferred over the network.
-* A user can only be invited into an Earthly org if they already have a user account. This is a temporary limitation which will be addressed in the future.
-* Satellites in conjunction with `--save-inline-cache` or `--use-inline-cache` is currently unsupported. When using `--ci`, the options `--save-inline-cache` and `--use-inline-cache` will not be implicitly enabled when using Satellites.
+* Pull-through cache is currently not supported
 
-If you run into any issues please let us know either via [Slack](https://earthly.dev/slack), [GitHub issues](https://github.com/earthly/earthly/issues) or by [emailing support](mailto:support+satellite@earthly.dev).
+If you run into any issues please let us know either via [Slack](https://earthly.dev/slack), [GitHub issues](https://github.com/earthly/cloud-issues/issues) or by [emailing support](mailto:support+satellite@earthly.dev).

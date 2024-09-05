@@ -3,7 +3,7 @@
     {
       "command": {
         "args": [
-          "alpine:3.15"
+          "alpine:3.18"
         ],
         "name": "FROM"
       }
@@ -361,11 +361,88 @@
           }
         }
       ]
+    },
+    {
+      "name": "artifact-copy-exists",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "--if-exists",
+              "+save/ok",
+              "."
+            ],
+            "name": "COPY"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
+              "-f",
+              "ok"
+            ],
+            "name": "RUN"
+          }
+        }
+      ]
+    },
+    {
+      "name": "artifact-copy-not-exist",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "--if-exists",
+              "+save/not_ok",
+              "."
+            ],
+            "name": "COPY"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
+              "!",
+              "-f",
+              "not_ok"
+            ],
+            "name": "RUN"
+          }
+        }
+      ]
+    },
+    {
+      "name": "artifact-copy-not-exist-wildcard",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "--if-exists",
+              "+save/*_ok",
+              "."
+            ],
+            "name": "COPY"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test",
+              "!",
+              "-f",
+              "not_ok"
+            ],
+            "name": "RUN"
+          }
+        }
+      ]
     }
   ],
   "version": {
     "args": [
-      "0.6"
+      "0.8"
     ]
   }
 }

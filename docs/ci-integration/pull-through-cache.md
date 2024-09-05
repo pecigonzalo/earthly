@@ -17,10 +17,10 @@ A pull through cache is a registry mirror that contains no images. When your cli
 
 To run a cache, you'll need the ability to deploy a persistent service, somewhere. This could be a dedicated instance with Docker installed, or a container in your Kubernetes cluster.
 
-There are multiple ways to setup a registry -- Docker, for example, has a [guide for using the registry as a pull through cache](https://docs.docker.com/registry/recipes/mirror),
-as well as documentation for the [available options](https://docs.docker.com/registry/configuration/), and other details under the [registry image](https://hub.docker.com/_/registry).
+There are multiple ways to setup a registry -- Docker, for example, has a [guide for using the registry as a pull through cache](https://docs.docker.com/docker-hub/mirror/),
+as well as documentation for the [available options](https://distribution.github.io/distribution/about/configuration/), and other details under the [registry image](https://hub.docker.com/_/registry).
 
-Documenting all the possible ways to setup a pull through cache is beyond the scope of this document; however, it does include a [quick getting-started section](#insecure-docker-hub-cache-example) for those who wish
+Documenting all the possible ways to set up a pull through cache is beyond the scope of this document; however, it does include a [quick getting-started section](#insecure-docker-hub-cache-example) for those who wish
 to run an insecure pull through cache.
 
 ### Configuration & Tips
@@ -60,7 +60,6 @@ global:
       mirrors = ["<mirror>"]
 
     [registry."<mirror>"]
-      http = true
       insecure = true
 ```
 
@@ -142,7 +141,7 @@ Then restart docker:
 sudo service docker restart
 ```
 
-Next you should be able to pull an image (e.g. `docker pull alpine:3.15`), which should use the cache.
+Next you should be able to pull an image (e.g. `docker pull alpine:3.18`), which should use the cache.
 
 #### Verifying the Cache is Actually Working (Optional)
 
@@ -176,13 +175,12 @@ global:
     [registry."docker.io"]
       mirrors = ["192.168.0.80:5000"]
     [registry."192.168.0.80:5000"]
-      http = true
       insecure = true
 ```
 
 The next time earthly is run, it will detect the configuration change and will restart the `earthly-buildkitd` container to reflect these settings.
 
-You can force these settings to be applied, and verify the mirror appears in the buildkit config by running:
+You can force these settings to be applied, and verify the mirror appears in the BuildKit config by running:
 
 ```bash
 earthly bootstrap && docker exec earthly-buildkitd cat /etc/buildkitd.toml

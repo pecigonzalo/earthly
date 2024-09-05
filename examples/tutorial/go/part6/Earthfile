@@ -1,6 +1,6 @@
-VERSION 0.6
-FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+VERSION 0.8
+FROM golang:1.21-alpine3.18
+WORKDIR /go-workdir
 
 deps:
     COPY go.mod go.sum ./
@@ -11,12 +11,13 @@ deps:
 build:
     FROM +deps
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 
 docker:
-    COPY +build/go-example .
-    ENTRYPOINT ["/go-example/go-example"]
+    ARG tag='latest'
+    COPY +build/example .
+    ENTRYPOINT ["/go-workdir/example"]
     SAVE IMAGE --push earthly/examples:go
 
 test-setup:
@@ -27,8 +28,8 @@ test-setup:
     ENTRYPOINT [ "go", "test", "github.com/earthly/earthly/examples/go"]
     SAVE IMAGE test:latest
 
-with-docker-example:
-    FROM earthly/dind:alpine
+integration-tests:
+    FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
     COPY docker-compose.yml ./
     WITH DOCKER --compose docker-compose.yml --load tests:latest=+test-setup
         RUN docker run --network=default_go/part6_default tests:latest | grep "ok"

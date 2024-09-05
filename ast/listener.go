@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"sync"
+	"unicode"
 
+	"github.com/antlr/antlr4/runtime/Go/antlr/v4"
 	"github.com/earthly/earthly/ast/parser"
 	"github.com/earthly/earthly/ast/spec"
 	"github.com/pkg/errors"
@@ -27,11 +30,12 @@ type block struct {
 type listener struct {
 	*parser.BaseEarthParserListener
 
-	ef          *spec.Earthfile
-	target      *spec.Target
-	userCommand *spec.UserCommand
-	blocks      []*block
-	command     *spec.Command
+	tokStream *antlr.CommonTokenStream
+	ef        *spec.Earthfile
+	target    *spec.Target
+	function  *spec.Function
+	blocks    []*block
+	command   *spec.Command
 
 	stmtWords []string
 	execMode  bool
@@ -43,7 +47,7 @@ type listener struct {
 	err error
 }
 
-func newListener(ctx context.Context, filePath string, enableSourceMap bool) *listener {
+func newListener(ctx context.Context, stream *antlr.CommonTokenStream, filePath string, enableSourceMap bool) *listener {
 	ef := &spec.Earthfile{}
 	if enableSourceMap {
 		ef.SourceLocation = &spec.SourceLocation{
@@ -51,6 +55,7 @@ func newListener(ctx context.Context, filePath string, enableSourceMap bool) *li
 		}
 	}
 	return &listener{
+		tokStream:       stream,
 		ctx:             ctx,
 		filePath:        filePath,
 		enableSourceMap: enableSourceMap,
@@ -83,6 +88,32 @@ func (l *listener) popBlock() spec.Block {
 	return ret
 }
 
+func (l *listener) docs(c antlr.ParserRuleContext) string {
+	comments := l.tokStream.GetHiddenTokensToLeft(c.GetStart().GetTokenIndex(), parser.EarthLexerCOMMENTS_CHANNEL)
+	var docs string
+	var leadingTrim string
+	var once sync.Once
+	for _, c := range comments {
+		line := strings.TrimSpace(c.GetText())
+		line = strings.TrimPrefix(line, "#")
+		once.Do(func() {
+			runes := []rune(line)
+			var trimRunes []rune
+			for _, r := range runes {
+				if unicode.IsSpace(r) {
+					trimRunes = append(trimRunes, r)
+					continue
+				}
+				break
+			}
+			leadingTrim = string(trimRunes)
+		})
+		line = strings.TrimPrefix(line, leadingTrim)
+		docs += line + "\n"
+	}
+	return docs
+}
+
 // Base -----------------------------------------------------------------------
 
 func (l *listener) EnterEarthFile(c *parser.EarthFileContext) {
@@ -110,7 +141,8 @@ func (l *listener) EnterTarget(c *parser.TargetContext) {
 }
 
 func (l *listener) EnterTargetHeader(c *parser.TargetHeaderContext) {
-	l.target.Name = strings.TrimSuffix(c.GetText(), ":")
+	l.target.Name = strings.TrimSuffix(c.Target().GetText(), ":")
+	l.target.Docs = l.docs(c)
 }
 
 func (l *listener) ExitTarget(c *parser.TargetContext) {
@@ -122,9 +154,9 @@ func (l *listener) ExitTarget(c *parser.TargetContext) {
 // User command ---------------------------------------------------------------
 
 func (l *listener) EnterUserCommand(c *parser.UserCommandContext) {
-	l.userCommand = new(spec.UserCommand)
+	l.function = new(spec.Function)
 	if l.enableSourceMap {
-		l.userCommand.SourceLocation = &spec.SourceLocation{
+		l.function.SourceLocation = &spec.SourceLocation{
 			File:        l.filePath,
 			StartLine:   c.GetStart().GetLine(),
 			StartColumn: c.GetStart().GetColumn(),
@@ -136,13 +168,39 @@ func (l *listener) EnterUserCommand(c *parser.UserCommandContext) {
 }
 
 func (l *listener) EnterUserCommandHeader(c *parser.UserCommandHeaderContext) {
-	l.userCommand.Name = strings.TrimSuffix(c.GetText(), ":")
+	l.function.Name = strings.TrimSuffix(c.GetText(), ":")
 }
 
 func (l *listener) ExitUserCommand(c *parser.UserCommandContext) {
-	l.userCommand.Recipe = l.popBlock()
-	l.ef.UserCommands = append(l.ef.UserCommands, *l.userCommand)
-	l.userCommand = nil
+	l.function.Recipe = l.popBlock()
+	l.ef.Functions = append(l.ef.Functions, *l.function)
+	l.function = nil
+}
+
+// Function ---------------------------------------------------------------
+
+func (l *listener) EnterFunction(c *parser.FunctionContext) {
+	l.function = new(spec.Function)
+	if l.enableSourceMap {
+		l.function.SourceLocation = &spec.SourceLocation{
+			File:        l.filePath,
+			StartLine:   c.GetStart().GetLine(),
+			StartColumn: c.GetStart().GetColumn(),
+			EndLine:     c.GetStop().GetLine(),
+			EndColumn:   c.GetStop().GetColumn(),
+		}
+	}
+	l.pushNewBlock()
+}
+
+func (l *listener) EnterFunctionHeader(c *parser.FunctionHeaderContext) {
+	l.function.Name = strings.TrimSuffix(c.GetText(), ":")
+}
+
+func (l *listener) ExitFunction(c *parser.FunctionContext) {
+	l.function.Recipe = l.popBlock()
+	l.ef.Functions = append(l.ef.Functions, *l.function)
+	l.function = nil
 }
 
 // Statement ------------------------------------------------------------------
@@ -168,7 +226,9 @@ func (l *listener) ExitStmt(c *parser.StmtContext) {
 // Command --------------------------------------------------------------------
 
 func (l *listener) EnterCommandStmt(c *parser.CommandStmtContext) {
-	l.command = new(spec.Command)
+	l.command = &spec.Command{
+		Docs: l.docs(c),
+	}
 	if l.enableSourceMap {
 		l.command.SourceLocation = &spec.SourceLocation{
 			File:        l.filePath,
@@ -255,6 +315,14 @@ func (l *listener) EnterArgStmt(c *parser.ArgStmtContext) {
 	l.command.Name = "ARG"
 }
 
+func (l *listener) EnterSetStmt(c *parser.SetStmtContext) {
+	l.command.Name = "SET"
+}
+
+func (l *listener) EnterLetStmt(c *parser.LetStmtContext) {
+	l.command.Name = "LET"
+}
+
 func (l *listener) EnterLabelStmt(c *parser.LabelStmtContext) {
 	l.command.Name = "LABEL"
 }
@@ -287,6 +355,10 @@ func (l *listener) EnterUserCommandStmt(c *parser.UserCommandStmtContext) {
 	l.command.Name = "COMMAND"
 }
 
+func (l *listener) EnterFunctionStmt(c *parser.FunctionStmtContext) {
+	l.command.Name = "FUNCTION"
+}
+
 func (l *listener) EnterDoStmt(c *parser.DoStmtContext) {
 	l.command.Name = "DO"
 }
@@ -305,14 +377,6 @@ func (l *listener) EnterHostStmt(ctx *parser.HostStmtContext) {
 
 func (l *listener) EnterProjectStmt(c *parser.ProjectStmtContext) {
 	l.command.Name = "PROJECT"
-}
-
-func (l *listener) EnterPipelineStmt(c *parser.PipelineStmtContext) {
-	l.command.Name = "PIPELINE"
-}
-
-func (l *listener) EnterTriggerStmt(c *parser.TriggerStmtContext) {
-	l.command.Name = "TRIGGER"
 }
 
 // With -----------------------------------------------------------------------
@@ -625,11 +689,8 @@ func (l *listener) EnterStmtWord(c *parser.StmtWordContext) {
 
 // ----------------------------------------------------------------------------
 
-var envVarNameRegexp = regexp.MustCompile(`^[a-zA-Z_]+[a-zA-Z0-9_]*$`)
-
 func checkEnvVarName(str string) error {
-	itMatch := envVarNameRegexp.MatchString(str)
-	if !itMatch {
+	if !IsValidEnvVarName(str) {
 		return errors.Errorf("invalid env key definition %s", str)
 	}
 	return nil

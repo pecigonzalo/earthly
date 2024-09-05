@@ -17,7 +17,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/pkg/errors"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 func handlePtyData(data []byte) error {
@@ -55,7 +55,9 @@ func ConnectTerm(ctx context.Context, conn io.ReadWriteCloser, console consloggi
 		for {
 			connDataType, data, err := common.ReadDataPacket(conn)
 			if err != nil {
-				console.VerbosePrintf("ReadDataPacket failed: %s\n", err.Error())
+				if err != io.EOF {
+					console.VerbosePrintf("ReadDataPacket failed: %s\n", err.Error())
+				}
 				break
 			}
 			switch connDataType {
@@ -144,7 +146,7 @@ func ConnectTerm(ctx context.Context, conn io.ReadWriteCloser, console consloggi
 }
 
 type termState struct {
-	oldState *terminal.State
+	oldState *term.State
 	mu       sync.Mutex
 }
 
@@ -153,7 +155,7 @@ func (ts *termState) makeRaw() error {
 	defer ts.mu.Unlock()
 	if ts.oldState == nil {
 		var err error
-		ts.oldState, err = terminal.MakeRaw(int(os.Stdin.Fd()))
+		ts.oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
 		if err != nil {
 			return errors.Wrap(err, "failed to initialize terminal in raw mode")
 		}
@@ -165,7 +167,7 @@ func (ts *termState) restore() error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	if ts.oldState != nil {
-		err := terminal.Restore(int(os.Stdin.Fd()), ts.oldState)
+		err := term.Restore(int(os.Stdin.Fd()), ts.oldState)
 		if err != nil {
 			return errors.Wrap(err, "failed to restore terminal mode")
 		}

@@ -26,14 +26,12 @@ def test_interactive(earthly_path, timeout):
             # give the shell time to startup, otherwise stdin might be lost
             time.sleep(5)
 
-            # test we can select from the postgres database that is created via docker-compose
-            # this is wrapped in an infinite retry loop which pexpect will kill after the configured timeout
-            # the retry loop is required because the container reports an UP status before all data is loaded.
-            c.sendline('while ! docker exec test_postgres_1 psql -c "select name from country WHERE two_letter = \'AF\'" iso3166; do sleep 1; done')
+            # test we can obtain decoded text from the rot13 echo server that is created via docker-compose
+            c.sendline('docker exec rot13 sh -c \'(echo guvf vf zl Frpe3g Z3ff4tr; sleep 1) | ncat localhost 5432\'')
             try:
-                c.expect('Afghanistan', timeout=timeout)
+                c.expect('this is my Secr3t M3ss4ge', timeout=timeout)
             except Exception as e:
-                raise RuntimeError('failed to find Afghanistan in output (indicating we were unable to run psql in the postgres container that was started via docker compose)')
+                raise RuntimeError('failed to find "this is my Secr3t M3ss4ge" in output (indicating we were unable to obtain decoded text from the rot13 echo server that was started via docker compose)')
 
             # decode the data.txt file to ensure the debugger is still running
             c.sendline("cat /data.txt | base64 -d")
@@ -47,12 +45,13 @@ def test_interactive(earthly_path, timeout):
 
             assert not c.isalive()
         except pexpect.exceptions.TIMEOUT as e:
-            print('interactive test timedout')
+            print('ERROR: interactive test timed out')
             exit_code = 2
         except Exception as e:
-            print(f'interactive test failed with {e}')
+            print(f'ERROR: interactive test failed with {e}')
             exit_code = 1
         finally:
+            print('--------------')
             print('earthly output')
             s = ''.join(ch for ch in output.getvalue() if ch.isprintable() or ch == '\n')
             print(s)

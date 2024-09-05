@@ -4,20 +4,20 @@ To copy the files for [this example ( Part 6 )](https://github.com/earthly/earth
 earthly --artifact github.com/earthly/earthly/examples/tutorial/go:main+part6/part6 ./part6
 ```
 
-Examples in [Python](#more-examples), [Javascript](#more-examples) and [Java](#more-examples) are at the bottom of this page.
+Examples in [Python](#more-examples), [JavaScript](#more-examples) and [Java](#more-examples) are at the bottom of this page.
 
 ## The `WITH DOCKER` Command
 
-You may find that you need to run Docker commands inside of a target. For those cases Earthly offers `WITH DOCKER`. `WITH DOCKER` will initialize a Docker daemon that can be used in the context of a `RUN` command.
+You may find that you need to run Docker commands inside a target. For those cases Earthly offers `WITH DOCKER`. `WITH DOCKER` will initialize a Docker daemon that can be used in the context of a `RUN` command.
 
-Whenever you need to use `WITH DOCKER` we recommend (though it is not required) that you use Earthly's own Docker in Docker (dind) image: `earthly/dind:alpine`.
+Whenever you need to use `WITH DOCKER` we recommend (though it is not required) that you use Earthly's own Docker in Docker (dind) image: `earthly/dind:alpine-3.19-docker-25.0.5-r0`.
 
-Notice `WITH DOCKER` creates a block of code that has an `END` keyword. Everything that happens within this block is going to take place within our `earthly/dind:alpine` container.
+Notice `WITH DOCKER` creates a block of code that has an `END` keyword. Everything that happens within this block is going to take place within our `earthly/dind:alpine-3.19-docker-25.0.5-r0` container.
 
 ### Pulling an Image
 ```Dockerfile
 hello:
-    FROM earthly/dind:alpine
+    FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
     WITH DOCKER --pull hello-world
         RUN docker run hello-world
     END
@@ -35,7 +35,7 @@ my-hello-world:
     SAVE IMAGE my-hello:latest
 
 hello:
-    FROM earthly/dind:alpine
+    FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
     WITH DOCKER --load hello:latest=+my-hello-world
         RUN docker run hello:latest
     END
@@ -118,9 +118,9 @@ func TestIntegration(t *testing.T) {
 ```
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 
 deps:
     COPY go.mod go.sum ./
@@ -133,11 +133,11 @@ test-setup:
     COPY main.go .
     COPY main_integration_test.go .
     ENV CGO_ENABLED=0
-    ENTRYPOINT [ "go", "test", "github.com/earthly/earthly/examples/go"]
+    ENTRYPOINT ["go", "test", "github.com/earthly/earthly/examples/go"]
     SAVE IMAGE test:latest
 
 integration-tests:
-    FROM earthly/dind:alpine
+    FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
     COPY docker-compose.yml ./
     WITH DOCKER --compose docker-compose.yml --load tests:latest=+test-setup
         RUN docker run --network=default_go/part6_default tests:latest
@@ -145,10 +145,17 @@ integration-tests:
 ```
 When we use the `--compose` flag, Earthly will start up the services defined in the `docker-compose` file for us. In this case, we built a separate image that copies in our test files and uses the command to run the tests as its `ENTRYPOINT`. We can then load this image into our `WITH DOCKER` command. Note that loading an image will not run it by default, we need to explicitly run the image after we load it.
 
+You'll need to use `--allow-privileged` (or `-P` for short) to run this example. 
+
+```bash
+earthly --allow-privileged +integration-tests
+```
+
+
 ## More Examples
 
 <details open>
-<summary>Javascript</summary>
+<summary>JavaScript</summary>
 
 To copy the files for [this example ( Part 6 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/js/part6) run
 
@@ -292,7 +299,7 @@ The `Earthfile` is at the root of the directory.
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM node:13.10.1-alpine3.11
 WORKDIR /js-example
 
@@ -339,7 +346,7 @@ api-docker:
 
 # Run your app and api side by side
 app-with-api:
-    FROM earthly/dind:alpine
+    FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
     RUN apk add curl
     WITH DOCKER \
         --load app:latest=+app-docker \
@@ -369,7 +376,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/java:main+part6/
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM openjdk:8-jdk-alpine
 RUN apk add --update --no-cache gradle
 WORKDIR /java-example
@@ -394,14 +401,14 @@ docker:
     SAVE IMAGE java-example:$tag
 
 with-postgresql:
-    FROM earthly/dind:alpine
-	  COPY ./docker-compose.yml .
-	  RUN apk update
-	  RUN apk add postgresql-client
-	  WITH DOCKER --compose docker-compose.yml --load app:latest=+docker
-		    RUN while ! pg_isready --host=localhost --port=5432; do sleep 1; done ;\
-			    docker run --network=default_java/part6_default app
-	  END
+    FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
+    COPY ./docker-compose.yml .
+    RUN apk update
+    RUN apk add postgresql-client
+    WITH DOCKER --compose docker-compose.yml --load app:latest=+docker
+        RUN while ! pg_isready --host=localhost --port=5432; do sleep 1; done ;\
+            docker run --network=default_java/part6_default app
+    END
 
 ```
 
@@ -492,10 +499,10 @@ dependencies {
 <details open>
 <summary>Python</summary>
 
-To copy the files for [this example ( Part 7 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/python/part7) run
+To copy the files for [this example ( Part 6 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/python/part6) run
 
 ```bash
-earthly --artifact github.com/earthly/earthly/examples/tutorial/python:main+part7/part7 ./part7
+earthly --artifact github.com/earthly/earthly/examples/tutorial/python:main+part6/part6 ./part6
 ```
 `./tests/test_db_connection.py`
 
@@ -542,17 +549,17 @@ networks:
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM python:3
 WORKDIR /code
 
 build:
-  COPY ./requirements.txt .
-  RUN pip install -r requirements.txt
-  COPY . .
+    COPY ./requirements.txt .
+    RUN pip install -r requirements.txt
+    COPY . .
 
 run-tests:
-    FROM earthly/dind:alpine
+    FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
     COPY ./docker-compose.yml .
     COPY ./tests ./tests
     RUN apk update

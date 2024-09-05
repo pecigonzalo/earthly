@@ -1,5 +1,5 @@
-VERSION 0.6
-FROM alpine:3.15
+VERSION 0.8
+FROM alpine:3.18
 
 #################################################################################################################
 # tests for testing RUN commands are executed on the localhost
@@ -10,9 +10,11 @@ test-local-with-arg:
     ARG pattern
     RUN set -e; \
         if [ "$(uname -s)" = "Darwin" ]; then \
-            echo "locally must be working"; \
+            echo "locally must be working (since we cant run darwin via runc)"; \
+        elif [ "$(cat /proc/1/comm)" = "systemd" ]; then \
+            test "$(systemd-detect-virt --container)" = "none" || (echo "systemd-detect-virt --container returned $(systemd-detect-virt --container) instead" && exit 1); \
         else \
-            cat /proc/1/cgroup | grep -v $FRONTEND | grep $pattern; \
+            echo "unable to deteremine if running locally or not; got init process of $(cat /proc/1/comm)" && exit 1; \
         fi
 
 test-local:
@@ -22,9 +24,11 @@ test-local:
     RUN whoami
     RUN set -e; \
         if [ "$(uname -s)" = "Darwin" ]; then \
-            echo "locally must be working"; \
+            echo "locally must be working (since we cant run darwin via runc)"; \
+        elif [ "$(cat /proc/1/comm)" = "systemd" ]; then \
+            test "$(systemd-detect-virt --container)" = "none" || (echo "systemd-detect-virt --container returned $(systemd-detect-virt --container) instead" && exit 1); \
         else \
-            cat /proc/1/cgroup | perl -pe 'BEGIN {$status=1} END {exit $status} $status=0 if /^[0-9]+:cpuset:\/$/;'; \
+            echo "unable to deteremine if running locally or not; got init process of $(cat /proc/1/comm)" && exit 1; \
         fi
 
 
@@ -86,6 +90,30 @@ test-save-local-artifact-with-workdir:
     COPY +save-local-artifact-with-workdir/data .
     RUN cat data | grep '^ddd$'
 
+#################################################################################################################
+# tests for testing overwriting existing local files
+
+some-artifact:
+    RUN printf '4321' > four-bytes.txt
+    SAVE ARTIFACT four-bytes.txt
+
+test-local-overwrites:
+    LOCALLY
+    RUN rm -fr              /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda && \
+        mkdir -p            /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda && \
+        printf "12345678" > /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda/eight.txt && \
+        printf "1234"     > /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda/four.txt && \
+        printf "12"       > /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda/two.txt
+    # In previous releases this would result in "43215678"
+    COPY +some-artifact/four-bytes.txt /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda/eight.txt
+    # These always worked fine
+    COPY +some-artifact/four-bytes.txt /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda/four.txt
+    COPY +some-artifact/four-bytes.txt /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda/two.txt
+    RUN set -e; \
+        for i in eight four two; do \
+            cat /tmp/earthly-test-21f37581-de77-4f81-ac78-4a2a617f7eda/${i}.txt | grep '^4321$'; \
+        done
+
 
 #################################################################################################################
 # tests for testing containerized artifacts can be referenced by local targets
@@ -109,7 +137,7 @@ test-copy-from-busybox-to-local-with-workdir:
     RUN cat /tmp/earthly-test-5816ebd4-6b18-421e-a1b4-5991af91e11e/0b59ac77-91d7-4b84-9d1c-12f64fc6f48e | grep "BusyBox v1.32.1"
 
 alpine-artifacts:
-    FROM alpine:3.15.0 # if this is changed, the grep in test-multi-copy-from-alpine-to-local must also be updated
+    FROM alpine:3.18.3 # if this is changed, the grep in test-multi-copy-from-alpine-to-local must also be updated
     SAVE ARTIFACT /etc/alpine-release alpine-release
     SAVE ARTIFACT /etc/motd alpine-motd
     SAVE ARTIFACT /etc/os-release alpine-os-release
@@ -118,7 +146,7 @@ test-multi-copy-from-alpine-to-local:
     LOCALLY
     RUN rm -rf /tmp/ac0887d7-fda7-4a1b-9873-054488c7e44d
     COPY +alpine-artifacts/alpine-release +alpine-artifacts/alpine-motd +alpine-artifacts/alpine-os-release /tmp/ac0887d7-fda7-4a1b-9873-054488c7e44d
-    RUN cat /tmp/ac0887d7-fda7-4a1b-9873-054488c7e44d/alpine-release | grep 3\\.15\\.0
+    RUN cat /tmp/ac0887d7-fda7-4a1b-9873-054488c7e44d/alpine-release | grep 3\\.18\\.3
     RUN cat /tmp/ac0887d7-fda7-4a1b-9873-054488c7e44d/alpine-motd | grep alpinelinux.org
     RUN cat /tmp/ac0887d7-fda7-4a1b-9873-054488c7e44d/alpine-os-release | grep "ID=alpine"
 
@@ -167,7 +195,7 @@ mycontainer2:
 test-with-docker:
     LOCALLY
     ARG FRONTEND=docker
-    RUN $FRONTEND images -q mycontainer-e3d32183-604d-4dc3-b519-f9af56ecb744 | xargs -n 1 -r $FRONTEND rmi
+    RUN $FRONTEND images -q mycontainer-e3d32183-604d-4dc3-b519-f9af56ecb744 | xargs -n 1 -r $FRONTEND rmi -f
     WITH DOCKER --load mycontainer-e3d32183-604d-4dc3-b519-f9af56ecb744:latest=+mycontainer
         RUN $FRONTEND run --rm mycontainer-e3d32183-604d-4dc3-b519-f9af56ecb744:latest | grep "hello world"
     END
@@ -175,7 +203,7 @@ test-with-docker:
 test-with-two-dockers:
     LOCALLY
     ARG FRONTEND=docker
-    RUN $FRONTEND images -q mycontainer-07cb0fb7-4574-45cc-97c8-2bc482cf1f75 | xargs -n 1 -r $FRONTEND rmi
+    RUN $FRONTEND images -q mycontainer-07cb0fb7-4574-45cc-97c8-2bc482cf1f75 | xargs -n 1 -r $FRONTEND rmi -f
     WITH DOCKER \
             --load mycontainer-07cb0fb7-4574-45cc-97c8-2bc482cf1f75:latest=+mycontainer \
             --load mycontainer-07cb0fb7-4574-45cc-97c8-2bc482cf1f75:hyperlatest=+mycontainer2
@@ -203,6 +231,7 @@ all:
     BUILD +test-save-unnamed-local-artifact
     BUILD +test-save-unnamed-local-artifact-dir
     BUILD +test-save-unnamed-local-artifact-dir2
+    BUILD +test-local-overwrites
     BUILD +test-with-docker --FRONTEND=$FRONTEND
     BUILD +test-with-two-dockers --FRONTEND=$FRONTEND
     BUILD ./with-docker-compose-local+all --FRONTEND=$FRONTEND --FRONTEND_COMPOSE=$FRONTEND_COMPOSE

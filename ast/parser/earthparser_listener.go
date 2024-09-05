@@ -1,8 +1,8 @@
-// Code generated from ast/parser/EarthParser.g4 by ANTLR 4.9.1. DO NOT EDIT.
+// Code generated from ast/parser/EarthParser.g4 by ANTLR 4.12.0. DO NOT EDIT.
 
 package parser // EarthParser
 
-import "github.com/antlr/antlr4/runtime/Go/antlr"
+import "github.com/antlr/antlr4/runtime/Go/antlr/v4"
 
 // EarthParserListener is a complete listener for a parse tree produced by EarthParser.
 type EarthParserListener interface {
@@ -28,6 +28,12 @@ type EarthParserListener interface {
 
 	// EnterUserCommandHeader is called when entering the userCommandHeader production.
 	EnterUserCommandHeader(c *UserCommandHeaderContext)
+
+	// EnterFunction is called when entering the function production.
+	EnterFunction(c *FunctionContext)
+
+	// EnterFunctionHeader is called when entering the functionHeader production.
+	EnterFunctionHeader(c *FunctionHeaderContext)
 
 	// EnterStmts is called when entering the stmts production.
 	EnterStmts(c *StmtsContext)
@@ -179,6 +185,12 @@ type EarthParserListener interface {
 	// EnterArgStmt is called when entering the argStmt production.
 	EnterArgStmt(c *ArgStmtContext)
 
+	// EnterSetStmt is called when entering the setStmt production.
+	EnterSetStmt(c *SetStmtContext)
+
+	// EnterLetStmt is called when entering the letStmt production.
+	EnterLetStmt(c *LetStmtContext)
+
 	// EnterOptionalFlag is called when entering the optionalFlag production.
 	EnterOptionalFlag(c *OptionalFlagContext)
 
@@ -218,6 +230,9 @@ type EarthParserListener interface {
 	// EnterUserCommandStmt is called when entering the userCommandStmt production.
 	EnterUserCommandStmt(c *UserCommandStmtContext)
 
+	// EnterFunctionStmt is called when entering the functionStmt production.
+	EnterFunctionStmt(c *FunctionStmtContext)
+
 	// EnterDoStmt is called when entering the doStmt production.
 	EnterDoStmt(c *DoStmtContext)
 
@@ -232,12 +247,6 @@ type EarthParserListener interface {
 
 	// EnterProjectStmt is called when entering the projectStmt production.
 	EnterProjectStmt(c *ProjectStmtContext)
-
-	// EnterPipelineStmt is called when entering the pipelineStmt production.
-	EnterPipelineStmt(c *PipelineStmtContext)
-
-	// EnterTriggerStmt is called when entering the triggerStmt production.
-	EnterTriggerStmt(c *TriggerStmtContext)
 
 	// EnterExpr is called when entering the expr production.
 	EnterExpr(c *ExprContext)
@@ -271,6 +280,12 @@ type EarthParserListener interface {
 
 	// ExitUserCommandHeader is called when exiting the userCommandHeader production.
 	ExitUserCommandHeader(c *UserCommandHeaderContext)
+
+	// ExitFunction is called when exiting the function production.
+	ExitFunction(c *FunctionContext)
+
+	// ExitFunctionHeader is called when exiting the functionHeader production.
+	ExitFunctionHeader(c *FunctionHeaderContext)
 
 	// ExitStmts is called when exiting the stmts production.
 	ExitStmts(c *StmtsContext)
@@ -422,6 +437,12 @@ type EarthParserListener interface {
 	// ExitArgStmt is called when exiting the argStmt production.
 	ExitArgStmt(c *ArgStmtContext)
 
+	// ExitSetStmt is called when exiting the setStmt production.
+	ExitSetStmt(c *SetStmtContext)
+
+	// ExitLetStmt is called when exiting the letStmt production.
+	ExitLetStmt(c *LetStmtContext)
+
 	// ExitOptionalFlag is called when exiting the optionalFlag production.
 	ExitOptionalFlag(c *OptionalFlagContext)
 
@@ -461,6 +482,9 @@ type EarthParserListener interface {
 	// ExitUserCommandStmt is called when exiting the userCommandStmt production.
 	ExitUserCommandStmt(c *UserCommandStmtContext)
 
+	// ExitFunctionStmt is called when exiting the functionStmt production.
+	ExitFunctionStmt(c *FunctionStmtContext)
+
 	// ExitDoStmt is called when exiting the doStmt production.
 	ExitDoStmt(c *DoStmtContext)
 
@@ -475,12 +499,6 @@ type EarthParserListener interface {
 
 	// ExitProjectStmt is called when exiting the projectStmt production.
 	ExitProjectStmt(c *ProjectStmtContext)
-
-	// ExitPipelineStmt is called when exiting the pipelineStmt production.
-	ExitPipelineStmt(c *PipelineStmtContext)
-
-	// ExitTriggerStmt is called when exiting the triggerStmt production.
-	ExitTriggerStmt(c *TriggerStmtContext)
 
 	// ExitExpr is called when exiting the expr production.
 	ExitExpr(c *ExprContext)

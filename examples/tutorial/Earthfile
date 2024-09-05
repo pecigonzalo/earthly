@@ -1,5 +1,5 @@
-VERSION 0.6
-FROM alpine:3.15
+VERSION 0.8
+FROM alpine:3.18
 WORKDIR /tutorial
 
 test:
@@ -61,7 +61,7 @@ test-part6:
         --lang=java \
         --lang=python \
         --part=part6 \
-        --target=with-docker-example
+        --target=integration-tests
 
 test-part:
     LOCALLY

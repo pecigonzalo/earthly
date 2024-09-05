@@ -3,27 +3,36 @@ package builder
 import (
 	"context"
 	"io"
+	"maps"
 
 	"github.com/earthly/earthly/conslogging"
 	"github.com/earthly/earthly/domain"
-	"github.com/earthly/earthly/outmon"
+	"github.com/earthly/earthly/earthfile2llb"
+	"github.com/earthly/earthly/logbus/solvermon"
 	"github.com/earthly/earthly/states"
+	"github.com/earthly/earthly/util/flagutil"
 	"github.com/earthly/earthly/util/fsutilprogress"
+
 	"github.com/moby/buildkit/client"
 	gwclient "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/pullping"
 	"github.com/moby/buildkit/util/entitlements"
+	"github.com/moby/buildkit/util/grpcerrors"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 )
+
+// statusChanSize is used to ensure we consume all BK status messages without
+// causing back-pressure that forces BK to cancel.
+const statusChanSize = 500
 
 type onImageFunc func(context.Context, *errgroup.Group, string, string, string) (io.WriteCloser, error)
 type onArtifactFunc func(context.Context, string, domain.Artifact, string, string) (string, error)
 type onFinalArtifactFunc func(context.Context) (string, error)
 
 type solver struct {
-	sm              *outmon.SolverMonitor
+	logbusSM        *solvermon.SolverMonitor
 	bkClient        *client.Client
 	attachables     []session.Attachable
 	enttlmnts       []entitlements.Entitlement
@@ -34,7 +43,7 @@ type solver struct {
 }
 
 func (s *solver) buildMainMulti(ctx context.Context, bf gwclient.BuildFunc, onImage onImageFunc, onArtifact onArtifactFunc, onFinalArtifact onFinalArtifactFunc, onPullCallback pullping.PullCallback, phaseText string, console conslogging.ConsoleLogger) error {
-	ch := make(chan *client.SolveStatus)
+	ch := make(chan *client.SolveStatus, statusChanSize)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	eg, ctx := errgroup.WithContext(ctx)
@@ -47,6 +56,11 @@ func (s *solver) buildMainMulti(ctx context.Context, bf gwclient.BuildFunc, onIm
 		var err error
 		_, err = s.bkClient.Build(ctx, *solveOpt, "", bf, ch)
 		if err != nil {
+			if grpcErr, ok := grpcerrors.AsGRPCStatus(err); ok {
+				if ie, ok := earthfile2llb.FromError(errors.New(grpcErr.Message())); ok {
+					err = ie
+				}
+			}
 			// The actual error from bkClient.Build sometimes races with
 			// a context cancelled in the solver monitor.
 			buildErr = err
@@ -54,18 +68,15 @@ func (s *solver) buildMainMulti(ctx context.Context, bf gwclient.BuildFunc, onIm
 		}
 		return nil
 	})
-	var vertexFailureOutput string
 	eg.Go(func() error {
-		var err error
-		vertexFailureOutput, err = s.sm.MonitorProgress(ctx, ch, phaseText, false, s.bkClient)
-		return err
+		return s.logbusSM.MonitorProgress(ctx, ch)
 	})
 	err = eg.Wait()
 	if buildErr != nil {
-		return NewBuildError(buildErr, vertexFailureOutput)
+		return buildErr
 	}
 	if err != nil {
-		return NewBuildError(err, vertexFailureOutput)
+		return err
 	}
 	return nil
 }
@@ -77,10 +88,18 @@ func (s *solver) newSolveOptMulti(ctx context.Context, eg *errgroup.Group, onIma
 	}
 	var cacheExports []client.CacheOptionsEntry
 	if s.cacheExport != "" {
-		cacheExports = append(cacheExports, newCacheExportOpt(s.cacheExport, false))
+		cacheExportName, attrs, err := flagutil.ParseImageNameAndAttrs(s.cacheExport)
+		if err != nil {
+			return nil, errors.Wrapf(err, "parse export cache error: %s", s.cacheExport)
+		}
+		cacheExports = append(cacheExports, newCacheExportOpt(cacheExportName, attrs, false))
 	}
 	if s.maxCacheExport != "" {
-		cacheExports = append(cacheExports, newCacheExportOpt(s.maxCacheExport, true))
+		maxCacheExportName, attrs, err := flagutil.ParseImageNameAndAttrs(s.maxCacheExport)
+		if err != nil {
+			return nil, errors.Wrapf(err, "parse max export cache error: %s", s.maxCacheExport)
+		}
+		cacheExports = append(cacheExports, newCacheExportOpt(maxCacheExportName, attrs, true))
 	}
 	if s.saveInlineCache {
 		cacheExports = append(cacheExports, newInlineCacheOpt())
@@ -140,9 +159,10 @@ func newCacheImportOpt(ref string) client.CacheOptionsEntry {
 	}
 }
 
-func newCacheExportOpt(ref string, max bool) client.CacheOptionsEntry {
+func newCacheExportOpt(ref string, attrs map[string]string, max bool) client.CacheOptionsEntry {
 	registryCacheOptAttrs := make(map[string]string)
 	registryCacheOptAttrs["ref"] = ref
+	maps.Copy(registryCacheOptAttrs, attrs)
 	if max {
 		registryCacheOptAttrs["mode"] = "max"
 	}

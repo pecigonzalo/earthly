@@ -1,5 +1,4 @@
-
-VERSION 0.6
+VERSION 0.8
 
 all:
     BUILD \
@@ -31,7 +30,7 @@ all:
 #     docker run --rm earthly/examples:multiplatform_linux_arm_v6
 #
 docker:
-    FROM alpine:3.15
+    FROM alpine:3.18
     RUN uname -m
     CMD ["uname", "-m"]
     SAVE IMAGE --push earthly/examples:multiplatform

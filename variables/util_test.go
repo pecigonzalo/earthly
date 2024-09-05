@@ -1,9 +1,9 @@
-package variables
+package variables_test
 
 import (
 	"testing"
 
-	. "github.com/stretchr/testify/assert"
+	"github.com/earthly/earthly/variables"
 )
 
 func TestParseEscapedKeyValue(t *testing.T) {
@@ -28,7 +28,7 @@ func TestParseEscapedKeyValue(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		k, v, ok := ParseKeyValue(tt.kv)
+		k, v, ok := variables.ParseKeyValue(tt.kv)
 		Equal(t, tt.k, k)
 		Equal(t, tt.v, v)
 		Equal(t, tt.ok, ok)

@@ -1,53 +1,16 @@
 # Managing Satellites
 
-This feature is part of the Earthly Satellites paid plan.
-
-{% hint style='danger' %}
-##### Important
-
-This feature is currently in **Beta** stage
-
-* The feature may break or change significantly in future versions of Earthly.
-* Give us feedback on
-  * [Slack](https://earthly.dev/slack)
-  * [GitHub issues](https://github.com/earthly/earthly/issues)
-  * [Emailing support](mailto:support+satellite@earthly.dev)
-{% endhint %}
-
 This page describes how to use [Earthly Satellites](../satellites.md).
 
 ## Prerequisites
 
 In order to use Earthly Satellites, you must have an Earthly account and you must be a member of an Earthly organization. For more information, see the [Earthly Cloud overview](../overview.md) and the [Satellites page](../satellites.md).
 
-If you are new to Earthly or to Earthly Cloud, you must:
-
-* [Download and Install Earthly](https://earthly.dev/get-earthly). As Earthly Satellites is under active development, it is strongly recommended that you ensure that you have the very latest version of Earthly installed.
-  
-  **On Linux**, simply repeat the [installation steps](https://earthly.dev/get-earthly) to upgrade to the latest version of Earthly, if you installed Earthly some time ago.
-  
-  **On Mac**, you can perform:
-
-  ```bash
-  brew update
-  brew upgrade earthly/earthly/earthly
-  ```
-* Create an account by visiting the [Earthly CI website](https://ci.earthly.dev/) to log in with GitHub or by using `earthly account register --email <email>` in your terminal.
-* Either [create an Earthly organization](../overview.md), or ask your Earthly admin to add you to an existing organization. In order to be added to an existing Earthly organization you need to first create an Earthly account as described above. To verify that you are part of an organization you can run:
-  
-  ```bash
-  earthly org ls
-  ```
-
-  You should see an output similar to:
-
-  ```
-  /<org-name>/  member
-  ```
+If you are new to Earthly or to Earthly Cloud, get started by signing up for free at [Earthly Cloud](https://cloud.earthly.dev/login).
 
 ## Background
 
-Earthly Satellites allow Earthly to execute builds in the cloud seemlessly. You execute build commands in the terminal, like you always have (for example, `earthly +build`), and Earthly takes care of running the build in the cloud in real time, instead of your local machine.
+Earthly Satellites allow Earthly to execute builds in the cloud seamlessly. You execute build commands in the terminal, like you always have (for example, `earthly +build`), and Earthly takes care of running the build in the cloud in real time, instead of your local machine.
 
 It uploads parts of your working directory, passes along any secrets, executes the build in the cloud while streaming the build log in real-time back to you, and then downloads the resulting build images and artifacts back to your computer.
 
@@ -55,16 +18,16 @@ For more information about how Earthly Satellites work, see the [Satellites page
 
 ## Using satellites
 
-When you are added to an Earthly organization, you get access to its satellites. To view the satellites currently available in the organization, you can run:
+When you are added to an Earthly organization, you get access to its satellites. You can use the following command to select the organization:
+
+```bash
+earthly org select <org-name>
+```
+
+To view the satellites currently available in the organization, you can run:
 
 ```bash
 earthly sat ls
-```
-
-If you are part of multiple organizations, you may need to specify the organization name too:
-
-```bash
-earthly sat --org <org-name> ls
 ```
 
 ### Selecting a satellite
@@ -91,7 +54,7 @@ The following feature flags are recommended for use with Satellites and will be 
            satellite | Connecting to core-test...
            satellite | ...Done
            satellite | Version github.com/earthly/buildkit v0.6.21 7a6f9e1ab2a3a3ddec5f9e612ef390af218a32bd
-           satellite | Info: Buildkit version (v0.6.21) is different from Earthly version (prerelease)
+           satellite | Info: BuildKit version (v0.6.21) is different from Earthly version (prerelease)
            satellite | Platforms: linux/amd64 (native) linux/amd64/v2 linux/amd64/v3 linux/amd64/v4 linux/arm64 linux/riscv64 linux/ppc64le linux/s390x linux/386 linux/mips64le linux/mips64 linux/arm/v7 linux/arm/v6
            satellite | Utilization: 0 other builds, 0/12 op load
            satellite | GC stats: 9.0 GB cache, avg GC duration 275ms, all-time GC duration 2.754s, last GC duration 0s, last cleared 0 B
@@ -107,7 +70,7 @@ earthly sat unselect
 
 ### Specifying a satellite for one build only
 
-If a satellite is not currently selected, you can still use it for a specific build by using the `--sat` flag.
+If a satellite is not currently selected, you can still use it for a specific build by using the `--sat` flag or the corresponding `EARTHLY_SATELLITE` environment variable.
 
 ```bash
 earthly --sat <satellite-name> +build

@@ -1,4 +1,4 @@
-VERSION 0.6
+VERSION 0.8
 FROM python:3
 WORKDIR /code
 
@@ -11,8 +11,8 @@ build:
     COPY src src
     SAVE ARTIFACT src /src
 
-with-docker-example:
-	FROM earthly/dind:alpine
+integration-tests:
+	FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
 	COPY ./docker-compose.yml .
 	COPY ./tests ./tests
 	RUN apk update

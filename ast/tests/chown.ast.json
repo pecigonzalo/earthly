@@ -3,7 +3,7 @@
     {
       "command": {
         "args": [
-          "alpine:3.15"
+          "alpine:3.18"
         ],
         "name": "FROM"
       }
@@ -68,10 +68,7 @@
               "test",
               "testuser",
               "==",
-              "$(stat",
-              "-c",
-              "%U",
-              "./a.txt)"
+              "$(stat -c %U ./a.txt)"
             ],
             "name": "RUN"
           }
@@ -82,10 +79,7 @@
               "test",
               "testgroup",
               "==",
-              "$(stat",
-              "-c",
-              "%G",
-              "./a.txt)"
+              "$(stat -c %G ./a.txt)"
             ],
             "name": "RUN"
           }
@@ -132,7 +126,7 @@
   ],
   "version": {
     "args": [
-      "0.6"
+      "0.8"
     ]
   }
 }

@@ -76,7 +76,9 @@ func (gc *GatewayCrafter) AddSaveArtifactLocal(ref gwclient.Reference, refID int
 // all SAVE IMAGE logic is triggered via the WAIT/END PopWaitBlock() function.
 func (gc *GatewayCrafter) AddRef(k string, ref gwclient.Reference) {
 	gc.assertNotDone()
-	gc.res.AddRef(k, ref)
+	if ref != nil {
+		gc.res.AddRef(k, ref)
+	}
 }
 
 // AddMeta adds metadata to the results to be exported.
@@ -87,14 +89,14 @@ func (gc *GatewayCrafter) AddMeta(k string, v []byte) {
 	gc.res.AddMeta(k, v)
 }
 
-// GetRefsAndMetadata fetches the result Refs and Metadata; it is not re-entrant
+// GetRefsAndMetadata fetches the result Refs and Metadata; it is not reentrant
 func (gc *GatewayCrafter) GetRefsAndMetadata() (map[string]gwclient.Reference, map[string][]byte) {
 	gc.assertNotDone()
 	gc.done = true
 	return gc.res.Refs, gc.res.Metadata
 }
 
-// GetResult fetches the gwclient result object; it is not re-entrant
+// GetResult fetches the gwclient result object; it is not reentrant
 func (gc *GatewayCrafter) GetResult() *gwclient.Result {
 	gc.assertNotDone()
 	gc.done = true

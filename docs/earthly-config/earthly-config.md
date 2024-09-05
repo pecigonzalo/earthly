@@ -56,7 +56,8 @@ earthly config global.cache_size_mb 20000
 
 ### cache_size_mb
 
-Specifies the total size of the BuildKit cache, in MB. The BuildKit daemon uses this setting to configure automatic garbage collection of old cache. A value of 0 causes the size to be adaptive depending on how much space is available on your system. The default is 0.
+Specifies the total size of the BuildKit cache, in MB. The BuildKit daemon uses this setting to configure automatic garbage collection of old cache.
+Setting this to 0, either explicitly or by omission, will cause BuildKit to use its internal default of 10% of the root filesystem.
 
 ### cache_size_pct
 
@@ -67,7 +68,7 @@ When used in combination with `cache_size_mb`, the lesser of the two values will
 
 A custom user-supplied program to call which returns a secret for use by earthly. The secret identifier is passed as the first argument to the program.
 
-If no secret is found, the program can instruct earthly to continue searching for secrets under `.env`, by exiting with a status code of `2`, all other non-zero
+If no secret is found, the program can instruct earthly to continue searching for secrets under `.secret`, by exiting with a status code of `2`, all other non-zero
 status codes will cause earthly to exit.
 
 For example, if you have:
@@ -125,7 +126,7 @@ The number of concurrent converters for speeding up build targets that use block
 
 ### buildkit_max_parallelism
 
-The maximum parallelism configured for the buildkit daemon workers. The default is 20.
+The maximum parallelism configured for the BuildKit daemon workers. The default is 20.
 
 {% hint style='info' %}
 ##### Note
@@ -136,16 +137,40 @@ Set this configuration to a lower value if your machine is resource constrained 
 
 ### buildkit_additional_args
 
-This option allows you to pass additional options to Docker when starting up the Earthly BuildKit daemon. For example, this can be used to bypass user namespacing like so:
+This option allows you to pass additional options to Docker when starting up the Earthly BuildKit daemon. 
+Note that changes to these values will trigger earthly to restart BuildKit on the next run.
+
+#### Bypass User Namespacing
+
+The `--userns` flag can be set as follows:
 
 ```yaml
 global:
   buildkit_additional_args: ["--userns", "host"]
 ```
 
+#### Session Timeout
+
+By default, BuildKit will automatically cancel sessions (i.e. individual builds) after 24 hours.
+This value can be overriden using the following option:
+
+```yaml
+global:
+  buildkit_additional_args: ["-e", "BUILDKIT_SESSION_TIMEOUT=72h"]
+```
+
+Note that setting a value of zero `0` here will disable the feature entirely.
+This can be useful in cases where long-lived interactive sessions are used.
+
 ### buildkit_additional_config
 
-This option allows you to pass additional options to BuildKit. For example, this can be used to specify additional CA certificates:
+This option allows you to pass additional options to BuildKit.
+Note that changes to these values will trigger earthly to restart BuildKit on the next run.
+
+
+#### Additional CA Certificates
+
+Additional CA certificates can be passed in to BuildKit. This also requires a corresponding change in `buildkit_additional_args`.
 
 ```yaml
 global:
@@ -167,9 +192,40 @@ Allows overriding Earthly's automatic `ip_tables` module detection. Valid choice
 
 This option is obsolete and it is ignored. Earthly no longer uses a loop device for its cache.
 
-### cache_path (obsolete)
+### git_image
 
-This option is obsolete and it is ignored. Earthly cache has moved to a Docker volume. For more information see the [page on managing cache](../guides/cache.md).
+Allows to override the image used to run internal `git` commands (e.g. during `GIT CLONE` or `IMPORT`). This defaults to `alpine/git:v2.30.1`.
+
+### org
+
+The default organization to use when performing Earthly operations that require an organization. Ignored when  the `--org` CLI option is present, or when the `EARTHLY_ORG` environment variable are set.
+
+### Frontend configuration
+
+This option allows you to specify what supported frontend you are using (Docker / Podman).
+By default, Earthly will attempt to discover the frontend in this order: Docker -> Podman -> None
+
+For Docker:
+```yaml
+global:
+  container_frontend: docker-shell
+```
+
+For Podman:
+```yaml
+global:
+  container_frontend: podman-shell
+```
+
+You can use the following command to set the configuration option using the earthly CLI:
+
+```bash
+# Docker
+earthly config 'global.container_frontend' 'docker-shell'
+
+# Podman
+earthly config 'global.container_frontend' 'podman-shell'
+```
 
 ## Git configuration reference
 
@@ -204,7 +260,6 @@ The `strict_host_key_checking` option can be used to control access to ssh-based
 Strict host key checking is enabled by default, setting it to `false` disables host key checking.
 This setting is only used when auth is `ssh`.
 
-
 {% hint style='info' %}
 ##### Tip
 Disabling strict host key checking is a bad security practice (as it makes a man-in-the-middle attack possible).
@@ -214,6 +269,11 @@ Instead, it's recommended to record the host's ssh key to `~/.ssh/known_hosts`; 
 ssh-keyscan <hostname> >> ~/.ssh/known_hosts
 ```
 {% endhint %}
+
+#### ssh_command
+
+The `ssh_command` option can be used to override the ssh command that is used by `git` when connecting to an ssh-based repository.
+For example, if you need to connect to an outdated sshd-server which only supports the insecure RSA signature algorithm, you could set the `ssh_command` to `ssh -o 'PubKeyAcceptedKeyTypes +ssh-rsa'`.
 
 #### port
 

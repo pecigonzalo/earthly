@@ -7,7 +7,7 @@
         {
           "command": {
             "args": [
-              "alpine:3.15"
+              "alpine:3.18"
             ],
             "name": "FROM"
           }
@@ -16,20 +16,7 @@
           "command": {
             "args": [
               "echo",
-              "$(cat",
-              "/dev/urandom",
-              "|",
-              "tr",
-              "-dc",
-              "'a-zA-Z0-9'",
-              "|",
-              "fold",
-              "-w",
-              "32",
-              "|",
-              "head",
-              "-n",
-              "1)",
+              "$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)",
               ">>",
               "file.txt",
               "&&",
@@ -55,7 +42,7 @@
   ],
   "version": {
     "args": [
-      "0.6"
+      "0.8"
     ]
   }
 }

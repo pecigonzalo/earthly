@@ -1,11 +1,11 @@
-VERSION 0.6
+VERSION 0.7 # Do not update this to 0.8 (function.earth is used for testing 0.8)
 
-FROM alpine:3.15
+FROM alpine:3.18
 WORKDIR /test
 
-ARG global_var=default
+ARG --global global_var=default
 
-all:
+all-positive:
     BUILD +test-basic
     BUILD +test-remote-no-context
     BUILD +test-nested
@@ -70,6 +70,9 @@ test-global-override:
     DO +TOUCH_GLOBAL --global_var=override
     RUN test -f ./override
 
+test-function-fails:
+    DO +TEST_FUNCTION_FAILS
+
 TOUCH:
     COMMAND
     RUN touch a.txt
@@ -112,3 +115,7 @@ TOUCH_GLOBAL:
     COMMAND
     RUN test "$global_var" != ""
     RUN touch $global_var
+
+TEST_FUNCTION_FAILS:
+    FUNCTION
+    RUN echo this should not be printed

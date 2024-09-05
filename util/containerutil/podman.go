@@ -30,8 +30,6 @@ func NewPodmanShellFrontend(ctx context.Context, cfg *FrontendConfig) (Container
 			Console:                 cfg.Console,
 		},
 	}
-	// TODO: Find a cleaner way to pass down information to the shellFrontend
-	fe.FrontendInformation = fe.Information
 
 	output, err := fe.commandContextOutput(ctx, "info", "--format={{.Host.Security.Rootless}}")
 	if err != nil {
@@ -111,7 +109,10 @@ func (psf *podmanShellFrontend) Information(ctx context.Context) (*FrontendInfo,
 	}
 
 	allInfo := info{}
-	json.Unmarshal([]byte(output.string()), &allInfo)
+	err = json.Unmarshal([]byte(output.string()), &allInfo)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse version output %s", output.string())
+	}
 
 	host := "daemonless"
 	if hasRemote {
@@ -165,8 +166,8 @@ func (psf *podmanShellFrontend) ImageLoadFromFileCommand(filename string) string
 func (psf *podmanShellFrontend) ImageLoad(ctx context.Context, images ...io.Reader) error {
 	var err error
 	for _, image := range images {
-		// Write the image to a temp file. This is needed to accomodate some Podman versions between 3.0 and 3.4. Because
-		// buildkit creates weird hybrid docker/OCI images, Podman pulls it in as an OCI image and ends up negelcting the
+		// Write the image to a temp file. This is needed to accommodate some Podman versions between 3.0 and 3.4. Because
+		// buildkit creates weird hybrid docker/OCI images, Podman pulls it in as an OCI image and ends up neglecting the
 		// in-built image tag. We can get around this by "pulling" a tar file and specifying the format at the CLI. This
 		// is more or less what Podman will be doing going forward. For further context, see the linked issues and discussion
 		// here: https://github.com/earthly/earthly/issues/1285
@@ -230,7 +231,7 @@ func (psf *podmanShellFrontend) VolumeInfo(ctx context.Context, volumeNames ...s
 
 				results[volumeName] = &VolumeInfo{
 					Name:       volumeName,
-					Size:       bytes,
+					SizeBytes:  bytes,
 					Mountpoint: string(mountpoint.string()),
 				}
 				break

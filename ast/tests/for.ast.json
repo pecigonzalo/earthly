@@ -3,7 +3,7 @@
     {
       "command": {
         "args": [
-          "alpine:3.15"
+          "alpine:3.18"
         ],
         "name": "FROM"
       }
@@ -147,9 +147,7 @@
         "args": [
           "another-var",
           "IN",
-          "$(not",
-          "in",
-          "quotes)"
+          "$(not in quotes)"
         ],
         "body": [
           {
@@ -353,9 +351,7 @@
             "args": [
               "another-var",
               "IN",
-              "$(not",
-              "in",
-              "quotes)"
+              "$(not in quotes)"
             ],
             "body": [
               {
@@ -420,7 +416,7 @@
   ],
   "version": {
     "args": [
-      "0.6"
+      "0.8"
     ]
   }
 }

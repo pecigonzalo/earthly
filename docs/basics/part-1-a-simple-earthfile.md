@@ -1,24 +1,24 @@
 Below you'll find a simple example of an Earthfile. All the magic of Earthly happens in the Earthfile, which you may notice is very similar to a Dockerfile. This is an intentional design decision. Existing Dockerfiles can easily be ported to Earthly by copying them to an Earthfile and tweaking them slightly.
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
- 
+WORKDIR /go-workdir
+
 build:
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 
 docker:
-    COPY +build/go-example .
-    ENTRYPOINT ["/go-example/go-example"]
+    COPY +build/example .
+    ENTRYPOINT ["/go-workdir/example"]
     SAVE IMAGE go-example:latest
 ```
 
 Throughout this tutorial, we'll build up this example Earthfile from scratch and then add even more to it. By the end you'll have a better grasp of how Earthly works and the power and repeatability it can bring to your build process.
 
-This tutorial focuses on using Earthly with a Go project, but you can find examples of Earthfiles for [Python](#more-examples), [Javascript](#more-examples) and [Java](#more-examples) at the bottom of each page.
+This tutorial focuses on using Earthly with a Go project, but you can find examples of Earthfiles for [Python](#more-examples), [JavaScript](#more-examples) and [Java](#more-examples) at the bottom of each page.
 
 To copy the files for [this example ( Part 1 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/go/part1) run
 
@@ -32,11 +32,11 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/go:main+part1/pa
 
 We'll slowly build up to the Earthfile we have above. Let's start with these first three lines.
 
-`Earthfile`
+`./tutorial/Earthfile`
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 ```
 And some simple Hello World code in a `main.go`.
 
@@ -52,57 +52,59 @@ func main() {
 Earthfiles are always named Earthfile, regardless of their location in the codebase. 
 The Earthfile starts off with a version definition. This will tell Earthly which features to enable and which ones not to so that the build script maintains compatibility over time, even if Earthly itself is updated.
 
-
 The first commands in the file are part of the `base` target and are implicitly inherited by all other targets. Targets are just sets of instructions we can call on from within the Earthfile, or when we run Earthly at the command line. Targets need an environment to run in. These environments come in the form of Docker images. In this case we are saying that all the instructions in our Earthfile will use `golang:1.15-alpine3.13`, [unless we specify otherwise](#target-environments). (More on this in a bit.)
 
-Lastly, we change our working directory to `/go-example`.
+Lastly, we change our working directory to `/go-workdir`.
 
 ## Creating Your First Targets
 Earthly aims to replace Dockerfile, makefile, bash scripts and more. We can take all the setup, configuration and build steps we'd normally define in those files and put them in our Earthfile in the form of `targets`.
 
-Let's start by defining a target to build our simple Go app. **When we run Earthly, we can tell it to execute a target by passing a plus for target (+) and then the target name.** So we'll be able to run our target with `earthly +build`.
+Let's start by defining a target to build our simple Go app. **When we run Earthly, we can tell it to execute a target by passing a plus sign (+) and then the target name.** So we'll be able to run our `build` target with `earthly +build`.  More on this in the [Running the Build](#running-the-build) section.
+
+Let's start by breaking down our first target.
 
 ```Dockerfile
 build:
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example
 ```
-The first thing we do is copy our `main.go` from the build context (the directory where the Earthfile resides) to the build environment (the containerized environment where Earthly commands are run).
+
+The first thing we do is copy our `main.go` from the **build context** (the directory where the Earthfile resides) to the **build environment** (the containerized environment where Earthly commands are run).
 
 Next, we run a go build command against the previously copied `main.go` file.
 
-Finally, we save the output of the build command as an artifact called `/go-example` (it can be later referenced as `+build/go-example`).
+Finally, we save the output of the build command as an artifact. The syntax for `SAVE ARTIFACT` defaults the destination path to `/` - so our artifact will be called `/example` (it can be later referenced as `+build/example`). If we wanted to save it at a different path, we could use `SAVE ARTIFACT output/example /some/path/to/example` and refer to it later as `+build/some/path/to/example`.
 
 Now let's create a new target called `+docker`.
 
 ```Dockerfile
 docker:
-    COPY +build/go-example .
-    ENTRYPOINT ["/go-example/go-example"]
+    COPY +build/example .
+    ENTRYPOINT ["/go-workdir/example"]
     SAVE IMAGE go-example:latest
 ```
-Here we copy the artifact `/go-example` produced by another target, `+build`, to the current directory within the build environment. Set the entrypoint for the resulting docker image.
+Here we copy the artifact `/example` produced by another target, `+build`, to the current directory within the build environment. Again this will be the working directory we set up in the `base` target at the beginning of the file. Lastly, we set the entrypoint for the resulting docker image, and then save the image.
 
-You may notice the command `COPY +build/... ...`, which has an unfamiliar form. This is a special type of `COPY`, which can be used to pass artifacts from one target to another. In this case, the target `build` (referenced as `+build`) produces an artifact, which has been declared with `SAVE ARTIFACT`, and the target `docker` copies that artifact in its build environment.
+You may notice the command `COPY +build/... ...`, which has an unfamiliar form if you're coming from Docker. This is a special type of `COPY`, which can be used to pass artifacts from one target to another. In this case, the target `build` (referenced as `+build`) produces an artifact, which has been declared with `SAVE ARTIFACT`, and the target `docker` copies that artifact in its build environment.
 
-With Earthly you have the ability to pass such artifacts or images between targets within the same Earthfile, but also across different Earthfiles across directories or even across repositories. To read more about this, see the [target, artifact and image referencing guide](../guides/target-ref.md) or jump to [part 5](./part-5-importing.md) of this guide.
+With Earthly you have the ability to pass such artifacts or images between targets within the same Earthfile, but also across different Earthfiles across directories or even across repositories. To read more about this, see the [importing guide](../guides/importing.md) or jump to [part 5](./part-5-importing.md) of this guide.
 
 Lastly, we save the current state as a docker image, which will have the docker tag `go-example:latest`. This image is only made available to the host's docker if the entire build succeeds.
 
 ## Target Environments
 
-Notice how we already had Go installed for both our `+build` and `+docker` targets. This is because  targets inherit from the base target which for us was the `FROM golang:1.15-alpine3.13` that we set up at the top of the file, but it's worth noting that targets can define their own environments. For example:
+Notice how we already had Go installed for both our `+build` and `+docker` targets. This is because  targets inherit from the base target which for us was the `FROM golang:1.15-alpine3.13` that we set up at the top of the file. But it's worth noting that targets can define their own environments. For example:
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 
 build:
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 
 npm:
     FROM node:12-alpine3.12
@@ -139,11 +141,14 @@ Once the build has executed, we can run the resulting docker image to try it out
 
 ```
 docker run --rm go-example:latest
+
+# or podman
+podman run --rm go-example:latest
 ```
 
 ### More Examples
 <details open>
-<summary>Javascript</summary>
+<summary>JavaScript</summary>
 
 To copy the files for [this example ( Part 1 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/js/part1) run
 
@@ -156,7 +161,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/js:main+part1/pa
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM node:13.10.1-alpine3.11
 WORKDIR /js-example
 
@@ -197,7 +202,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/java:main+part1/
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM openjdk:8-jdk-alpine
 RUN apk add --update --no-cache gradle
 WORKDIR /java-example
@@ -265,7 +270,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/python:main+part
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM python:3
 WORKDIR /code
 

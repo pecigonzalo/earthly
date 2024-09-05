@@ -7,7 +7,7 @@
         {
           "command": {
             "args": [
-              "alpine:3.15"
+              "alpine:3.18"
             ],
             "name": "FROM"
           }
@@ -69,23 +69,44 @@
         {
           "command": {
             "args": [
-              "1",
-              "AS",
-              "LOCAL",
-              "surprise"
+              "EARTHLY_PUSH"
             ],
-            "name": "SAVE ARTIFACT"
+            "name": "ARG"
           }
         },
         {
-          "command": {
-            "args": [
-              "2",
-              "AS",
-              "LOCAL",
-              "2"
+          "if": {
+            "expression": [
+              "[",
+              "\"$EARTHLY_PUSH\"",
+              "=",
+              "\"true\"",
+              "]"
             ],
-            "name": "SAVE ARTIFACT"
+            "ifBody": [
+              {
+                "command": {
+                  "args": [
+                    "1",
+                    "AS",
+                    "LOCAL",
+                    "surprise"
+                  ],
+                  "name": "SAVE ARTIFACT"
+                }
+              },
+              {
+                "command": {
+                  "args": [
+                    "2",
+                    "AS",
+                    "LOCAL",
+                    "2"
+                  ],
+                  "name": "SAVE ARTIFACT"
+                }
+              }
+            ]
           }
         }
       ]
@@ -96,7 +117,7 @@
         {
           "command": {
             "args": [
-              "alpine:3.15"
+              "alpine:3.18"
             ],
             "name": "FROM"
           }
@@ -123,7 +144,7 @@
   ],
   "version": {
     "args": [
-      "0.6"
+      "0.8"
     ]
   }
 }

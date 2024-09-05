@@ -1,19 +1,31 @@
 #!/bin/bash
 set -xeu
 
+received_interrupt=0
+function interrupt() {
+    echo "received interrupt"
+    received_interrupt=1
+}
+trap interrupt INT
+
 function cleanup() {
     status="$?"
-    jobs="$(jobs -p)"
-    if [ -n "$jobs" ]
-    then
-        # shellcheck disable=SC2086 # Intended splitting of
-        kill $jobs
-    fi
-    wait
-    if [ "$status" = "0" ]; then
-      echo "buildkite-test passed"
-    else
-      echo "buildkite-test failed with $status"
+    if [ "$received_interrupt" = "0" ]; then
+        set +e
+        echo "killing background jobs"
+        jobs
+        jobs -p | xargs -r kill -9
+        set -e
+        wait
+        echo "killing background jobs done"
+        if [ "$status" = "0" ]; then
+          echo "buildkite-test passed"
+        else
+          echo "=== buildkit logs ==="
+          docker logs earthly-dev-buildkitd || true
+          echo "=== end of buildkit logs ==="
+          echo "buildkite-test failed with $status"
+        fi
     fi
 }
 trap cleanup EXIT
@@ -40,7 +52,12 @@ else
     exit 1
 fi
 
-echo "The detected architecture of the runner is $(uname -m)"
+set +xu
+echo "Running under pid=$$; arch=$(uname -m)"
+for k in BUILDKITE_AGENT_ID BUILDKITE_BUILD_ID BUILDKITE_JOB_ID; do
+    echo "$k=${!k}"
+done
+set -xu
 
 if ! git symbolic-ref -q HEAD >/dev/null; then
     echo "Add branch info back to git (Earthly uses it for tagging)"
@@ -53,6 +70,15 @@ if [ -n "$download_url" ]; then
     released_earthly=./earthly-released
 fi
 
+echo "docker login"
+set +x # dont echo secrets
+DOCKER_USER="$("$released_earthly" secret --org earthly-technologies --project core get -n dockerhub/user)"
+DOCKER_TOKEN="$("$released_earthly" secret --org earthly-technologies --project core get -n dockerhub/token)"
+test -n "$DOCKER_USER" || (echo "failed to get DOCKER_USER" && exit 1)
+test -n "$DOCKER_TOKEN" || (echo "failed to get DOCKER_TOKEN" && exit 1)
+echo "$DOCKER_TOKEN" | docker login --username "$DOCKER_USER" --password-stdin
+set -x
+
 echo "Prune cache for cross-version compatibility"
 "$released_earthly" prune --reset
 
@@ -61,9 +87,6 @@ echo "Build latest earthly using released earthly"
 "$released_earthly" config global.disable_analytics true
 "$released_earthly" +for-"$EARTHLY_OS"
 chmod +x "$earthly"
-
-EARTHLY_VERSION_FLAG_OVERRIDES="$(tr -d '\n' < .earthly_version_flag_overrides)"
-export EARTHLY_VERSION_FLAG_OVERRIDES
 
 # WSL2 sometimes gives a "Text file busy" when running the native binary, likely due to crossing the WSL/Windows divide.
 # This should be enough retry to skip that, and fail if theres _actually_ a problem.
@@ -75,10 +98,7 @@ do
     sleep $(( att_num++ ))
 done
 
-"$earthly" config global.conversion_parallelism 5
-
-export EARTHLY_VERSION_FLAG_OVERRIDES="referenced-save-only"
-"$earthly" config global.local_registry_host 'tcp://127.0.0.1:8371'
+"$earthly" config global.buildkit_max_parallelism 2
 
 # Yes, there is a bug in the upstream YAML parser. Sorry about the jank here.
 # https://github.com/go-yaml/yaml/issues/423
@@ -86,13 +106,67 @@ export EARTHLY_VERSION_FLAG_OVERRIDES="referenced-save-only"
 
  mirrors = [\"registry-1.docker.io.mirror.corp.earthly.dev\"]'"
 
-echo "Execute tests"
-"$earthly" --ci -P \
-    --build-arg DOCKERHUB_AUTH=true \
-    --build-arg DOCKERHUB_USER_SECRET=+secrets/earthly-technologies/dockerhub-mirror/user \
-    --build-arg DOCKERHUB_TOKEN_SECRET=+secrets/earthly-technologies/dockerhub-mirror/pass \
-    --build-arg DOCKERHUB_MIRROR=registry-1.docker.io.mirror.corp.earthly.dev \
-  +test
+# setup secrets
+set +x # dont echo secrets
+echo "DOCKERHUB_USER=$($earthly secret --org earthly-technologies --project core get -n dockerhub/user || kill $$)" > .secret
+echo "DOCKERHUB_PASS=$($earthly secret --org earthly-technologies --project core get -n dockerhub/pass || kill $$)" >> .secret
+echo "DOCKERHUB_MIRROR_USER=$($earthly secret --org earthly-technologies --project core get -n dockerhub-mirror/user || kill $$)" > .secret
+echo "DOCKERHUB_MIRROR_PASS=$($earthly secret --org earthly-technologies --project core get -n dockerhub-mirror/pass || kill $$)" >> .secret
+# setup args
+echo "DOCKERHUB_MIRROR_AUTH=true" > .arg
+echo "DOCKERHUB_MIRROR=registry-1.docker.io.mirror.corp.earthly.dev" >> .arg
+set -x
+
+# stop the released earthly buildkitd container (to preserve memory)
+docker rm -f earthly-buildkitd 2> /dev/null || true
+
+max_attempts=2
+for target in \
+        +test-misc-group1 \
+        +test-misc-group2 \
+        +test-misc-group3 \
+        +test-ast-group1 \
+        +test-ast-group2 \
+        +test-ast-group3 \
+        +test-no-qemu-group1 \
+        +test-no-qemu-group2 \
+        +test-no-qemu-group3 \
+        +test-no-qemu-group4 \
+        +test-no-qemu-group5 \
+        +test-no-qemu-group6 \
+        +test-no-qemu-group7 \
+        +test-no-qemu-group8 \
+        +test-no-qemu-group9 \
+        +test-no-qemu-group10 \
+        +test-no-qemu-group11 \
+        +test-no-qemu-group12 \
+        +test-no-qemu-slow \
+        +test-qemu \
+        ; do
+    for attempt in $(seq 1 "$max_attempts"); do
+        # kill earthly-* containers to release memory (the macstadium machines have limited memory)
+        set +e
+        docker ps -a | grep earthly- | awk '{print $1}' | xargs -r docker rm -f
+        set -e
+
+        echo "=== running $target (attempt $attempt/$max_attempts ==="
+        set +e
+        "$earthly" --ci -P --exec-stats-summary=- "$target"
+        exit_code="$?"
+        set -e
+
+        if [ "$exit_code" = "0" ]; then
+            echo "$target passed"
+            break
+        fi
+
+        echo "$target failed"
+        if [ "$attempt" = "$max_attempts" ]; then
+            echo "final attempt reached, giving up"
+            exit 1
+        fi
+    done
+done
 
 echo "Execute fail test"
 bash -c "! $earthly --ci ./tests/fail+test-fail"

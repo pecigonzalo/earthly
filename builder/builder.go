@@ -6,16 +6,21 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/earthly/earthly/buildcontext"
 	"github.com/earthly/earthly/buildcontext/provider"
 	"github.com/earthly/earthly/cleanup"
+	"github.com/earthly/earthly/cmd/earthly/bk"
 	"github.com/earthly/earthly/conslogging"
 	"github.com/earthly/earthly/domain"
 	"github.com/earthly/earthly/earthfile2llb"
-	"github.com/earthly/earthly/outmon"
+	"github.com/earthly/earthly/logbus"
+	"github.com/earthly/earthly/logbus/solvermon"
+	"github.com/earthly/earthly/regproxy"
 	"github.com/earthly/earthly/states"
 	"github.com/earthly/earthly/util/containerutil"
 	"github.com/earthly/earthly/util/dockerutil"
@@ -32,26 +37,29 @@ import (
 	"github.com/moby/buildkit/client/llb"
 	gwclient "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/session"
+	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/util/apicaps"
 	"github.com/moby/buildkit/util/entitlements"
+	buildkitgitutil "github.com/moby/buildkit/util/gitutil"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 )
 
 const (
 	// PhaseInit is the phase text for the init phase.
-	PhaseInit = "1. Init 🚀"
+	PhaseInit = "Init 🚀"
 	// PhaseBuild is the phase text for the build phase.
-	PhaseBuild = "2. Build 🔧"
+	PhaseBuild = "Build 🔧"
 	// PhasePush is the phase text for the push phase.
-	PhasePush = "3. Push ⏫"
+	PhasePush = "Push Summary ⏫"
 	// PhaseOutput is the phase text for the output phase.
-	PhaseOutput = "4. Local Output 🎁"
+	PhaseOutput = "Local Output Summary 🎁"
 )
 
 // Opt represent builder options.
 type Opt struct {
-	SessionID                             string
 	BkClient                              *client.Client
+	LogBusSolverMonitor                   *solvermon.SolverMonitor
 	Console                               conslogging.ConsoleLogger
 	Verbose                               bool
 	Attachables                           []session.Attachable
@@ -67,17 +75,30 @@ type Opt struct {
 	OverridingVars                        *variables.Scope
 	BuildContextProvider                  *provider.BuildContextProvider
 	GitLookup                             *buildcontext.GitLookup
+	GitBranchOverride                     string
 	UseFakeDep                            bool
 	Strict                                bool
 	DisableNoOutputUpdates                bool
 	ParallelConversion                    bool
 	Parallelism                           semutil.Semaphore
+	DarwinProxyImage                      string
+	DarwinProxyWait                       time.Duration
 	LocalRegistryAddr                     string
+	DisableRemoteRegistryProxy            bool
 	FeatureFlagOverrides                  string
 	ContainerFrontend                     containerutil.ContainerFrontend
 	InternalSecretStore                   *secretprovider.MutableMapStore
 	InteractiveDebugging                  bool
 	InteractiveDebuggingDebugLevelLogging bool
+	GitImage                              string
+	GitLFSInclude                         string
+	GitLogLevel                           buildkitgitutil.GitLogLevel
+	BuildkitSkipper                       bk.BuildkitSkipper
+	NoAutoSkip                            bool
+}
+
+type ProjectAdder interface {
+	AddProject(org, project string)
 }
 
 // BuildOpt is a collection of build options.
@@ -86,6 +107,7 @@ type BuildOpt struct {
 	AllowPrivileged            bool
 	PrintPhases                bool
 	Push                       bool
+	CI                         bool
 	NoOutput                   bool
 	OnlyFinalTargetImages      bool
 	OnlyArtifact               *domain.Artifact
@@ -94,6 +116,11 @@ type BuildOpt struct {
 	BuiltinArgs                variables.DefaultArgs
 	GlobalWaitBlockFtr         bool
 	LocalArtifactWhiteList     *gatewaycrafter.LocalArtifactWhiteList
+	Logbus                     *logbus.Bus
+	MainTargetDetailsFunc      func(earthfile2llb.TargetDetails) error
+	Runner                     string
+	ProjectAdder               ProjectAdder
+	EarthlyCIRunner            bool
 }
 
 // Builder executes Earthly builds.
@@ -111,7 +138,7 @@ type Builder struct {
 func NewBuilder(ctx context.Context, opt Opt) (*Builder, error) {
 	b := &Builder{
 		s: &solver{
-			sm:              outmon.NewSolverMonitor(opt.Console, opt.Verbose, opt.DisableNoOutputUpdates),
+			logbusSM:        opt.LogBusSolverMonitor,
 			bkClient:        opt.BkClient,
 			cacheImports:    opt.CacheImports,
 			cacheExport:     opt.CacheExport,
@@ -123,7 +150,7 @@ func NewBuilder(ctx context.Context, opt Opt) (*Builder, error) {
 		opt:      opt,
 		resolver: nil, // initialized below
 	}
-	b.resolver = buildcontext.NewResolver(opt.SessionID, opt.CleanCollection, opt.GitLookup, opt.Console, opt.FeatureFlagOverrides)
+	b.resolver = buildcontext.NewResolver(opt.CleanCollection, opt.GitLookup, opt.Console, opt.FeatureFlagOverrides, opt.GitBranchOverride, opt.GitLFSInclude, opt.GitLogLevel, opt.GitImage)
 	return b, nil
 }
 
@@ -136,6 +163,76 @@ func (b *Builder) BuildTarget(ctx context.Context, target domain.Target, opt Bui
 	return mts, nil
 }
 
+func (b *Builder) startRegistryProxy(ctx context.Context, caps apicaps.CapSet) (func(), bool) {
+	cons := b.opt.Console.WithPrefix("registry-proxy")
+
+	if b.opt.DisableRemoteRegistryProxy {
+		cons.VerbosePrintf("Registry proxy disabled via --disable-remote-registry-proxy")
+		return nil, false
+	}
+
+	if err := caps.Supports(pb.CapEarthlyRegistryProxy); err != nil {
+		cons.Printf(err.Error())
+		return nil, false
+	}
+
+	// Podman does not support the insecure localhost
+	if b.opt.ContainerFrontend.Scheme() == "podman-container" {
+		cons.Printf("Registry proxy not supported on Podman. Falling back to tar-based outputs.")
+		return nil, false
+	}
+
+	useProxy, err := useSecondaryProxy()
+	if err != nil {
+		cons.Printf("Failed to check for registry proxy support: %v", err)
+		return nil, false
+	}
+
+	controller := regproxy.NewController(
+		b.s.bkClient.RegistryClient(),
+		b.opt.ContainerFrontend,
+		useProxy,
+		b.opt.DarwinProxyImage,
+		b.opt.DarwinProxyWait,
+		cons,
+	)
+	addr, closeFn, err := controller.Start(ctx)
+	if err != nil {
+		cons.Printf("Failed to start registry proxy: %v", err)
+		return nil, false
+	}
+
+	b.opt.LocalRegistryAddr = addr
+
+	return closeFn, true
+}
+
+// useSecondaryProxy detects if we're on Mac (Darwin) or running on Windows in WSL2 or otherwise.
+func useSecondaryProxy() (bool, error) {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return true, nil
+	}
+	versionFile := "/proc/version"
+	_, err := os.Stat(versionFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, errors.Wrapf(err, "failed to stat %s", versionFile)
+	}
+	f, err := os.Open(versionFile)
+	if err != nil {
+		return false, errors.Wrapf(err, "failed to open %s", versionFile)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return false, errors.Wrapf(err, "failed to read %s", versionFile)
+	}
+	s := string(data)
+	return strings.Contains(s, "WSL2"), nil
+}
+
 func (b *Builder) convertAndBuild(ctx context.Context, target domain.Target, opt BuildOpt) (*states.MultiTarget, error) {
 	var (
 		sharedLocalStateCache = earthfile2llb.NewSharedLocalStateCache()
@@ -146,21 +243,36 @@ func (b *Builder) convertAndBuild(ctx context.Context, target domain.Target, opt
 		exportCoordinator     = gatewaycrafter.NewExportCoordinator()
 
 		// dirIDs maps a dirIndex to a dirID; the "dir-id" field was introduced
-		// to accomodate parallelism in the WAIT/END PopWaitBlock handling
+		// to accommodate parallelism in the WAIT/END PopWaitBlock handling
 		dirIDs = map[int]string{}
 	)
+
 	var (
 		depIndex   = 0
 		imageIndex = 0
 		dirIndex   = 0
 	)
+
+	// Delay closing the registry proxy server until after the build function
+	// returns. This can be deferred within the build function once global wait
+	// block support is enabled.
+	stopRegistryProxyFunc := func() {}
+	defer func() {
+		stopRegistryProxyFunc()
+	}()
+
 	var mts *states.MultiTarget
-	bf := func(childCtx context.Context, gwClient gwclient.Client) (*gwclient.Result, error) {
+	buildFunc := func(childCtx context.Context, gwClient gwclient.Client) (*gwclient.Result, error) {
 		if opt.EnableGatewayClientLogging {
 			gwClient = gwclientlogger.New(gwClient)
 		}
 		var err error
 		caps := gwClient.BuildOpts().LLBCaps
+
+		if stopProxy, ok := b.startRegistryProxy(ctx, caps); ok {
+			stopRegistryProxyFunc = stopProxy
+		}
+
 		if !b.builtMain {
 			opt := earthfile2llb.ConvertOpt{
 				GwClient:                             gwClient,
@@ -168,8 +280,8 @@ func (b *Builder) convertAndBuild(ctx context.Context, target domain.Target, opt
 				ImageResolveMode:                     b.opt.ImageResolveMode,
 				CleanCollection:                      b.opt.CleanCollection,
 				PlatformResolver:                     opt.PlatformResolver.SubResolver(opt.PlatformResolver.Current()),
-				DockerImageSolverTar:                 newTarImageSolver(b.opt, b.s.sm),
-				MultiImageSolver:                     newMultiImageSolver(b.opt, b.s.sm),
+				DockerImageSolverTar:                 newTarImageSolver(b.opt, b.s.logbusSM),
+				MultiImageSolver:                     newMultiImageSolver(b.opt, b.s.logbusSM),
 				OverridingVars:                       b.opt.OverridingVars,
 				BuildContextProvider:                 b.opt.BuildContextProvider,
 				CacheImports:                         b.opt.CacheImports,
@@ -188,9 +300,12 @@ func (b *Builder) convertAndBuild(ctx context.Context, target domain.Target, opt
 				NoCache:                              b.opt.NoCache,
 				ContainerFrontend:                    b.opt.ContainerFrontend,
 				UseLocalRegistry:                     (b.opt.LocalRegistryAddr != ""),
+				LocalRegistryAddr:                    b.opt.LocalRegistryAddr,
 				DoSaves:                              !opt.NoOutput,
 				OnlyFinalTargetImages:                opt.OnlyFinalTargetImages,
 				DoPushes:                             opt.Push,
+				IsCI:                                 opt.CI,
+				EarthlyCIRunner:                      opt.EarthlyCIRunner,
 				ExportCoordinator:                    exportCoordinator,
 				LocalArtifactWhiteList:               opt.LocalArtifactWhiteList,
 				InternalSecretStore:                  b.opt.InternalSecretStore,
@@ -199,6 +314,13 @@ func (b *Builder) convertAndBuild(ctx context.Context, target domain.Target, opt
 				LLBCaps:                              &caps,
 				InteractiveDebuggerEnabled:           b.opt.InteractiveDebugging,
 				InteractiveDebuggerDebugLevelLogging: b.opt.InteractiveDebuggingDebugLevelLogging,
+				Logbus:                               opt.Logbus,
+				MainTargetDetailsFunc:                opt.MainTargetDetailsFunc,
+				Runner:                               opt.Runner,
+				ProjectAdder:                         opt.ProjectAdder,
+				FilesWithCommandRenameWarning:        make(map[string]bool),
+				BuildkitSkipper:                      b.opt.BuildkitSkipper,
+				NoAutoSkip:                           b.opt.NoAutoSkip,
 			}
 			mts, err = earthfile2llb.Earthfile2LLB(childCtx, target, opt, true)
 			if err != nil {
@@ -206,13 +328,20 @@ func (b *Builder) convertAndBuild(ctx context.Context, target domain.Target, opt
 			}
 		}
 		if opt.GlobalWaitBlockFtr {
-			b.opt.Console.Printf("skipping builder.go bf code due to GlobalWaitBlockFtr\n")
-			return nil, nil
+			if opt.OnlyArtifact != nil || opt.OnlyFinalTargetImages {
+				b.opt.Console.Printf("builder.go bf code is still required for OnlyArtifact or OnlyFinalTargetImages modes (GlobalWaitBlockFtr has no effect)\n")
+			} else {
+				b.opt.Console.Printf("skipping builder.go bf code due to GlobalWaitBlockFtr\n")
+				return nil, nil
+			}
 		}
 
 		// WARNING: the code below is deprecated, and will eventually be removed, in favour of wait_block.go
-		// This code is only used when dealing with VERISON 0.5 and 0.6; once these reach end-of-life, we can
+		// This code is only used when dealing with VERSION 0.5 and 0.6; once these reach end-of-life, we can
 		// delete the code below.
+
+		// NOTE: this code is still required to support remote caching; it can't be removed until
+		// https://github.com/earthly/earthly/issues/2178 is fixed.
 
 		// *** DO NOT ADD CODE TO THE bf BELOW ***
 
@@ -493,7 +622,7 @@ func (b *Builder) convertAndBuild(ctx context.Context, target domain.Target, opt
 	if opt.PrintPhases {
 		b.opt.Console.PrintPhaseHeader(PhaseBuild, false, "")
 	}
-	err := b.s.buildMainMulti(ctx, bf, onImage, onArtifact, onFinalArtifact, onPull, PhaseBuild, b.opt.Console)
+	err := b.s.buildMainMulti(ctx, buildFunc, onImage, onArtifact, onFinalArtifact, onPull, PhaseBuild, b.opt.Console)
 	if err != nil {
 		return nil, errors.Wrapf(err, "build main")
 	}
@@ -517,7 +646,7 @@ func (b *Builder) convertAndBuild(ctx context.Context, target domain.Target, opt
 			}
 		}
 		if hasRunPush {
-			err = b.s.buildMainMulti(ctx, bf, onImage, onArtifact, onFinalArtifact, onPull, PhasePush, b.opt.Console)
+			err = b.s.buildMainMulti(ctx, buildFunc, onImage, onArtifact, onFinalArtifact, onPull, PhasePush, b.opt.Console)
 			if err != nil {
 				return nil, errors.Wrapf(err, "build push")
 			}

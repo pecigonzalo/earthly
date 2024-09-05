@@ -3,7 +3,7 @@
     {
       "command": {
         "args": [
-          "alpine:3.15"
+          "alpine:3.18"
         ],
         "name": "FROM"
       }
@@ -38,6 +38,7 @@
               "FILE_IN_RUN=\"file-with-+.txt\"",
               "+test-copy-build-arg"
             ],
+            "docs": "TODO: FILE_IN_RUN shouldn't need to be different. This is a bug.\n",
             "name": "BUILD"
           }
         },
@@ -84,6 +85,7 @@
               "FILE_IN_RUN=\"another-file-with-+.txt\"",
               "+test-copy-artifact-with-plus-build-arg"
             ],
+            "docs": "TODO: FILE_IN_RUN shouldn't need to be different. This is a bug.\n",
             "name": "BUILD"
           }
         },
@@ -405,7 +407,7 @@
   ],
   "version": {
     "args": [
-      "0.6"
+      "0.8"
     ]
   }
 }

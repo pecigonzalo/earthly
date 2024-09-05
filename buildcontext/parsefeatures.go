@@ -1,6 +1,9 @@
 package buildcontext
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/earthly/earthly/ast"
 	"github.com/earthly/earthly/conslogging"
 	"github.com/earthly/earthly/features"
@@ -17,13 +20,21 @@ func parseFeatures(buildFilePath string, featureFlagOverrides string, projectRef
 		return nil, err
 	}
 
-	ftrs, hasVersion, err := features.GetFeatures(version)
+	ftrs, hasVersion, err := features.Get(version)
 	if err != nil {
 		return nil, err
 	}
 	if !hasVersion {
-		console.Warnf(
-			"Warning: No version specified in %s/Earthfile. Implying VERSION 0.5, which is not the latest available. Please note that in the future, the VERSION command will be required for all Earthfiles.\n", projectRef)
+		return nil, fmt.Errorf("No version specified in %s/Earthfile", projectRef)
+	}
+
+	warningStrs, err := ftrs.ProcessFlags()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(warningStrs) > 0 {
+		console.Printf("NOTE: The %s feature is enabled by default under VERSION %s, and can be safely removed from the VERSION command", strings.Join(warningStrs, ", "), ftrs.Version())
 	}
 
 	err = features.ApplyFlagOverrides(ftrs, featureFlagOverrides)

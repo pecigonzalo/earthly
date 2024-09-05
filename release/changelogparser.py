@@ -2,6 +2,7 @@
 import argparse
 import re
 import sys
+import packaging.version
 from collections import OrderedDict
 
 class ChangeLogParseError(Exception):
@@ -25,6 +26,15 @@ class MalformedUnorderedItemError(ChangeLogParseError):
     pass
 
 class DuplicateVersionError(ChangeLogParseError):
+    pass
+
+class MissingIsBuildkitUpdateRequired(ChangeLogParseError):
+    pass
+
+class MalformedAdditionalInfoLint(ChangeLogParseError):
+    pass
+
+class DuplicateBuildkitUpdateRequired(ChangeLogParseError):
     pass
 
 
@@ -54,13 +64,18 @@ def parse_line(line, line_num):
 
     return num_headers, line
 
-version_line_re = re.compile(r'^(v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?) - ([0-9]{4}-[0-9]{2}-[0-9]{2})$')
+version_line_re = re.compile(r'^(v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?) - ([0-9]{4}-[0-9]{2}-[0-9]{2})( \(aborted release/not recommended\))?$')
+
+def is_buildkit_change_additional_info_required(version):
+    return version != "Unreleased" and packaging.version.parse(version) >= packaging.version.parse('v0.7.19')
 
 def parse_changelog(changelog_data):
     versions = OrderedDict()
     def save_version(version, release_date, body):
         if version in versions:
-            raise DuplicateVersionError(version)
+            raise DuplicateVersionError(version, line_num)
+        if is_buildkit_change_additional_info_required(version) and is_buildkit_change_found is False:
+            raise MissingIsBuildkitUpdateRequired(f'Version {version} did not mention if release contains any buildkit changes', line_num)
         versions[version] = {
             'date': release_date,
             'body': '\n'.join(body),
@@ -69,9 +84,13 @@ def parse_changelog(changelog_data):
     line_num = 1
     version = None
     is_title_body = False
+    is_addition_info = False
+    is_buildkit_change_found = False
     dash_found = False
     body = []
     ignore = False
+    prev_header_num = None
+    prev_header_title = None
     for line_num, line in enumerate(changelog_data.splitlines()):
         num_headers, title = parse_line(line, line_num)
 
@@ -81,6 +100,8 @@ def parse_changelog(changelog_data):
             if not title.endswith(' Changelog'):
                 raise MissingTitleError("expected title ending with Changelog", line_num)
             is_title_body = True
+            prev_header_num = num_headers
+            prev_header_title = title
             continue
 
         if num_headers == 0:
@@ -90,7 +111,15 @@ def parse_changelog(changelog_data):
             if line == '<!--changelog-parser-ignore-end-->':
                 ignore = False
                 continue
-            if ignore:
+            if is_addition_info:
+                allowed_additional_info_lines = ('- This release has no changes to buildkit', '- This release includes changes to buildkit')
+                if line != '':
+                    if is_buildkit_change_found:
+                        raise DuplicateBuildkitUpdateRequired('buildkit update string already exists', line_num)
+                    if line not in allowed_additional_info_lines:
+                        raise MalformedAdditionalInfoLint(f'expected line of either {allowed_additional_info_lines}, but got "{line}" instead', line_num)
+                is_buildkit_change_found = True
+            elif ignore:
                 pass
             elif is_title_body:
                 pass # no linting of title body
@@ -112,6 +141,7 @@ def parse_changelog(changelog_data):
         elif num_headers == 2:
             is_intro = True
             ignore = False
+            is_addition_info = False
             if is_title_body:
                 if title != 'Unreleased':
                     raise MissingTitleError(f'expected `## Unreleased` title; got {line}', line_num)
@@ -128,15 +158,26 @@ def parse_changelog(changelog_data):
                 version = m.group(1)
                 release_date = m.group(3)
             body = []
+            is_buildkit_change_found = False
         elif num_headers == 3:
             ignore = False
             is_intro = False
-            allowed_titles = ('Added', 'Changed', 'Removed', 'Fixed')
-            if title not in allowed_titles:
-                raise UnexpectedHeaderError(f'expected header of {allowed_titles}; but got {title}', line_num)
+            is_addition_info = False
+            if title == 'Additional Info':
+                is_addition_info = True
+            else:
+                allowed_titles = ('Added', 'Changed', 'Removed', 'Fixed')
+                if title not in allowed_titles:
+                    raise UnexpectedHeaderError(f'expected header of {allowed_titles}; but got "{title}"', line_num)
+                if prev_header_num not in (2, 3):
+                    raise UnexpectedHeaderError(f'expected header "{title}" to be under a "vX.Y.Z" or "Unreleased" section, but instead it was located after "{prev_header_title}"', line_num)
             body.append(line)
         else:
             raise UnexpectedHeaderError(f'unsupported header {line}')
+
+        if num_headers > 0:
+            prev_header_num = num_headers
+            prev_header_title = title
 
     if version:
         save_version(version, release_date, body)
@@ -161,16 +202,22 @@ if __name__ == '__main__':
     try:
         changelog = parse_changelog(changelog_str)
     except MalformedVersionHeaderError as e:
-        print(f'failed to parse {path_str}:{e.line+1}: unable to parse "{e}"; should be of the form "v1.2.3 - YYYY-MM-DD" (or "v1.2.3-rc4 - YYYY-MM-DD")', file=sys.stderr)
+        print(f'{path_str}:{e.line+1}: unable to parse "{e}"; should be of the form "v1.2.3 - YYYY-MM-DD" (or "v1.2.3-rc4 - YYYY-MM-DD")', file=sys.stderr)
         sys.exit(1)
     except MalformedHeaderError as e:
-        print(f'failed to parse {path_str}:{e.line+1}: malformed header found ({e}); should be "#[#[...]] <title>"', file=sys.stderr)
+        print(f'{path_str}:{e.line+1}: malformed header found ({e}); should be "#[#[...]] <title>"', file=sys.stderr)
         sys.exit(1)
     except DuplicateVersionError as e:
-        print(f'failed to parse {path_str}:{e.line+1}: duplicate titles ({e}) detected', file=sys.stderr)
+        print(f'{path_str}:{e.line+1}: duplicate titles ({e}) detected', file=sys.stderr)
+        sys.exit(1)
+    except MissingIsBuildkitUpdateRequired as e:
+        print(f'{path_str}:{e.line+1}: Missing "Additional Info" section ({e})', file=sys.stderr)
+        sys.exit(1)
+    except MalformedAdditionalInfoLint as e:
+        print(f'{path_str}:{e.line+1}: Found an "Additional Info" section; however it is malformed: {e}', file=sys.stderr)
         sys.exit(1)
     except ChangeLogParseError as e:
-        print(f'failed to parse {path_str}:{e.line+1}: unhandled exception {e.__class__.__name__}: {e}', file=sys.stderr)
+        print(f'{path_str}:{e.line+1}: unhandled exception {e.__class__.__name__}: {e}', file=sys.stderr)
         sys.exit(1)
 
     if args.version is None:

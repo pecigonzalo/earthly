@@ -32,8 +32,6 @@ func NewDockerShellFrontend(ctx context.Context, cfg *FrontendConfig) (Container
 			Console:                 cfg.Console,
 		},
 	}
-	// TODO: Find a cleaner way to pass down information to the shellFrontend
-	fe.FrontendInformation = fe.Information
 
 	// running `docker info --format={{.SecurityOptions}}` results in a panic() when docker is not running.
 	// To workaround this issue, first we run `docker info` to test docker is running, then again with the
@@ -51,14 +49,30 @@ func NewDockerShellFrontend(ctx context.Context, cfg *FrontendConfig) (Container
 	}
 	fe.rootless = strings.Contains(output.string(), "rootless")
 	fe.userNamespaced = strings.Contains(output.string(), "name=userns")
-
 	if fe.userNamespaced {
 		fe.runCompatibilityArgs = []string{"--userns", "host"}
 	}
-
 	fe.urls, err = fe.setupAndValidateAddresses(FrontendDockerShell, cfg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to calculate buildkit URLs")
+	}
+
+	output, err = fe.commandContextOutput(ctx, "info", "--format={{.DockerRootDir}}")
+	if err != nil {
+		// Maybe the user has aliased podman=docker?
+		// (The same information is found at a different path in podman)
+		var err2 error
+		output, err2 = fe.commandContextOutput(ctx, "info", "--format={{.Store.GraphRoot}}")
+		if err2 != nil {
+			return nil, errors.Wrap(err, "failed to get docker root dir")
+		}
+	}
+	outputStr := strings.TrimSpace(output.string())
+	if outputStr == "/var/lib/containers/storage" {
+		// Likely podman making itself available via the docker CLI.
+		// This can happen either when podman set /var/run/docker.sock itself,
+		// or when the user has aliased podman=docker.
+		fe.shellFrontend.likelyPodman = true
 	}
 
 	return fe, nil
@@ -96,7 +110,10 @@ func (dsf *dockerShellFrontend) Information(ctx context.Context) (*FrontendInfo,
 	}
 
 	allInfo := info{}
-	json.Unmarshal([]byte(output.string()), &allInfo)
+	err = json.Unmarshal([]byte(output.string()), &allInfo)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse docker version output")
+	}
 
 	host, exists := os.LookupEnv("DOCKER_HOST")
 	if !exists {
@@ -201,7 +218,7 @@ func (dsf *dockerShellFrontend) VolumeInfo(ctx context.Context, volumeNames ...s
 				} else {
 					results[name] = &VolumeInfo{
 						Name:       volumeInfo.Name,
-						Size:       bytes,
+						SizeBytes:  bytes,
 						Mountpoint: volumeInfo.Mountpoint,
 					}
 				}

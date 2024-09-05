@@ -7,7 +7,6 @@ import (
 	"github.com/earthly/earthly/buildcontext"
 	"github.com/earthly/earthly/conslogging"
 
-	. "github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v2"
 )
 
@@ -73,10 +72,10 @@ func getApp() *cli.App {
 }
 
 func getPotentials(cmd string) ([]string, error) {
-	logger := conslogging.Current(conslogging.NoColor, 0, conslogging.Info)
+	logger := conslogging.Current(conslogging.NoColor, 0, conslogging.Info, false)
 	gitLookup := buildcontext.NewGitLookup(logger, "")
-	resolver := buildcontext.NewResolver("", nil, gitLookup, logger, "")
-	return GetPotentials(context.TODO(), resolver, nil, cmd, len(cmd), getApp())
+	resolver := buildcontext.NewResolver(nil, gitLookup, logger, "", "", "", 0, "")
+	return GetPotentials(context.TODO(), resolver, nil, cmd, len(cmd), getApp(), nil)
 }
 
 func TestFlagCompletion(t *testing.T) {

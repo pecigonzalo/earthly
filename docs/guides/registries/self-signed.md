@@ -9,7 +9,7 @@ For information about configuring the registry itself, see the [Docker Registry 
 No special considerations are needed in the Earthfile itself. You can use `SAVE IMAGE` just like any other repository.
 
 ```
-FROM alpine:3.15
+FROM alpine:3.18
 
 build:
     RUN echo "Hello from Earthly!" > motd
@@ -41,20 +41,28 @@ To configure Earthly to use an insecure registry, use the following [Earthly con
 global:
   buildkit_additional_config: |
     [registry."<registry-hostname>"]
-      http = true
       insecure = true
 ```
 
 In addition, you will need to specify the `--insecure` flag in any `SAVE IMAGE` command.  Again, the quotes are not a mistake, and should be left in.
 
 ```
-FROM alpine:3.15
+FROM alpine:3.18
 
 build:
     RUN echo "Hello from Earthly!" > motd
     ENTRYPOINT cat motd
     SAVE IMAGE --push --insecure <registry-hostname>/hello-earthly:with-love
 ```
+
+{% hint style='danger' %}
+##### Note
+
+The `http` and `insecure` settings are typically mutually exclusive. Setting `insecure=true` should only be used when the registry is https and is configured with an insecure certificate.
+Setting `http=true` is only for the case where a standard http-based registry is used (i.e. no SSL encryption). If both are set BuildKit will attempt to connect to the registry using either http (port 80), or https (port 443).
+
+{% endhint %}
+
 
 ## Other BuildKit options
 

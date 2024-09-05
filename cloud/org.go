@@ -14,9 +14,10 @@ import (
 
 // OrgDetail contains an organization and details
 type OrgDetail struct {
-	ID    string
-	Name  string
-	Admin bool
+	ID       string
+	Name     string
+	Admin    bool
+	Personal bool
 }
 
 // OrgPermissions contains permission details within an org
@@ -34,13 +35,13 @@ type OrgMember struct {
 }
 
 // ListOrgs lists all orgs a user has permission to view.
-func (c *client) ListOrgs(ctx context.Context) ([]*OrgDetail, error) {
-	status, body, err := c.doCall(ctx, "GET", "/api/v0/admin/organizations", withAuth())
+func (c *Client) ListOrgs(ctx context.Context) ([]*OrgDetail, error) {
+	status, body, err := c.doCall(ctx, "GET", "/api/v0/admin/organizations?includePersonalOrg=true", withAuth())
 	if err != nil {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return nil, errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -48,7 +49,7 @@ func (c *client) ListOrgs(ctx context.Context) ([]*OrgDetail, error) {
 	}
 
 	var listOrgsResponse secretsapi.ListOrgsResponse
-	err = c.jm.Unmarshal(bytes.NewReader([]byte(body)), &listOrgsResponse)
+	err = c.jum.Unmarshal(body, &listOrgsResponse)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to unmarshal list orgs response")
 	}
@@ -56,17 +57,19 @@ func (c *client) ListOrgs(ctx context.Context) ([]*OrgDetail, error) {
 	res := []*OrgDetail{}
 	for _, org := range listOrgsResponse.Details {
 		res = append(res, &OrgDetail{
-			ID:    org.Id,
-			Name:  org.Name,
-			Admin: org.Admin,
+			ID:       org.Id,
+			Name:     org.Name,
+			Admin:    org.Admin,
+			Personal: org.Type == secretsapi.OrgType_PERSONAL,
 		})
+		c.orgIDCache.Store(org.Name, org.Id)
 	}
 
 	return res, nil
 }
 
 // Invite a user to an org.
-func (c *client) Invite(ctx context.Context, path, user string, write bool) error {
+func (c *Client) Invite(ctx context.Context, path, user string, write bool) error {
 	orgName, ok := getOrgFromPath(path)
 	if !ok {
 		return errors.Errorf("invalid path")
@@ -85,7 +88,7 @@ func (c *client) Invite(ctx context.Context, path, user string, write bool) erro
 		return err
 	}
 	if status != http.StatusCreated {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -95,7 +98,7 @@ func (c *client) Invite(ctx context.Context, path, user string, write bool) erro
 }
 
 // RevokePermission removes the org permission from the user.
-func (c *client) RevokePermission(ctx context.Context, path, user string) error {
+func (c *Client) RevokePermission(ctx context.Context, path, user string) error {
 	orgName, ok := getOrgFromPath(path)
 	if !ok {
 		return errors.Errorf("invalid path")
@@ -111,7 +114,7 @@ func (c *client) RevokePermission(ctx context.Context, path, user string) error 
 		return err
 	}
 	if status != http.StatusOK {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -121,7 +124,7 @@ func (c *client) RevokePermission(ctx context.Context, path, user string) error 
 }
 
 // ListOrgPermissions returns all configured permissions for the org.
-func (c *client) ListOrgPermissions(ctx context.Context, path string) ([]*OrgPermissions, error) {
+func (c *Client) ListOrgPermissions(ctx context.Context, path string) ([]*OrgPermissions, error) {
 	orgName, ok := getOrgFromPath(path)
 	if !ok {
 		return nil, errors.Errorf("invalid path")
@@ -132,7 +135,7 @@ func (c *client) ListOrgPermissions(ctx context.Context, path string) ([]*OrgPer
 		return nil, err
 	}
 	if status != http.StatusOK {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return nil, errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -140,7 +143,7 @@ func (c *client) ListOrgPermissions(ctx context.Context, path string) ([]*OrgPer
 	}
 
 	var listOrgPermissionsResponse secretsapi.ListOrgPermissionsResponse
-	err = c.jm.Unmarshal(bytes.NewReader([]byte(body)), &listOrgPermissionsResponse)
+	err = c.jum.Unmarshal(body, &listOrgPermissionsResponse)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to unmarshal list org permissions response")
 	}
@@ -160,13 +163,13 @@ func (c *client) ListOrgPermissions(ctx context.Context, path string) ([]*OrgPer
 }
 
 // CreateOrg creates a new org by name.
-func (c *client) CreateOrg(ctx context.Context, org string) error {
+func (c *Client) CreateOrg(ctx context.Context, org string) error {
 	status, body, err := c.doCall(ctx, "PUT", fmt.Sprintf("/api/v0/admin/organizations/%s", url.QueryEscape(org)), withAuth())
 	if err != nil {
 		return err
 	}
 	if status != http.StatusCreated {
-		msg, err := getMessageFromJSON(bytes.NewReader([]byte(body)))
+		msg, err := getMessageFromJSON(bytes.NewReader(body))
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("failed to decode response body (status code: %d)", status))
 		}
@@ -176,7 +179,10 @@ func (c *client) CreateOrg(ctx context.Context, org string) error {
 }
 
 // GetOrgID retrieves the org ID for a named org.
-func (c *client) GetOrgID(ctx context.Context, orgName string) (string, error) {
+func (c *Client) GetOrgID(ctx context.Context, orgName string) (string, error) {
+	if orgID, ok := c.orgIDCache.Load(orgName); ok {
+		return orgID.(string), nil
+	}
 	orgs, err := c.ListOrgs(ctx)
 	if err != nil {
 		return "", err
@@ -187,6 +193,25 @@ func (c *client) GetOrgID(ctx context.Context, orgName string) (string, error) {
 		}
 	}
 	return "", errors.Errorf("org not found: %s", orgName)
+}
+
+// GuessOrgMembership returns an org name and ID if the user belongs to a single org
+// Deprecated: we should stop "guessing" org membership and have the user always specify they want to use.
+// A future `org select` command would make specifying the org easier.
+func (c *Client) GuessOrgMembership(ctx context.Context) (orgName, orgID string, err error) {
+	orgs, err := c.ListOrgs(ctx)
+	if err != nil {
+		return "", "", err
+	}
+
+	if len(orgs) == 2 {
+		for _, o := range orgs {
+			if !o.Personal {
+				return o.Name, o.ID, nil
+			}
+		}
+	}
+	return "", "", errors.New("please specify the name of the organization using `--org`")
 }
 
 func getOrgFromPath(path string) (string, bool) {

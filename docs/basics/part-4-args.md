@@ -4,7 +4,7 @@ To copy the files for [this example ( Part 4 )](https://github.com/earthly/earth
 earthly --artifact github.com/earthly/earthly/examples/tutorial/go:main+part4/part4 ./part4
 ```
 
-Examples in [Python](#more-examples), [Javascript](#more-examples) and [Java](#more-examples) are at the bottom of this page.
+Examples in [Python](#more-examples), [JavaScript](#more-examples) and [Java](#more-examples) are at the bottom of this page.
 
 ## Just Like Docker...Mostly
 
@@ -15,8 +15,8 @@ Let's say we wanted to have the option to pass in a tag for our Docker image whe
 ```Dockerfile
 docker:
     ARG tag='latest'
-    COPY +build/go-example .
-    ENTRYPOINT ["/go-example/go-example"]
+    COPY +build/example .
+    ENTRYPOINT ["/go-workdir/example"]
     SAVE IMAGE go-example:$tag
 ```
 In our `+docker` target we can create an `ARG` called tag. In this case, we give it a default value of `latest`. If we do not provide a default value the default will be an empty string.
@@ -41,8 +41,8 @@ We can also pass `ARG`s when referencing a target inside an Earthfile. Using the
 ```Dockerfile
 docker:
     ARG tag='latest'
-    COPY +build/go-example .
-    ENTRYPOINT ["/go-example/go-example"]
+    COPY +build/example .
+    ENTRYPOINT ["/go-workdir/example"]
     SAVE IMAGE go-example:$tag
 
 with-build:
@@ -57,11 +57,11 @@ We can also pass `ARG`s when using the `COPY` command, though the syntax is a li
 build:
     ARG version
     COPY main.go .
-    RUN go build -o build/go-example-$version main.go
-    SAVE ARTIFACT build/go-example-$version /go-example AS LOCAL build/go-example
+    RUN go build -o output/example-$version main.go
+    SAVE ARTIFACT output/example-$version AS LOCAL local-output/go-example
 
 with-copy:
-    COPY (+build/go-example --version='1.0') .
+    COPY (+build/example --version='1.0') .
 ```
 
 ## Builtin `ARG`s
@@ -79,7 +79,7 @@ In this case we've declared the `ARG` `USERARCH` which is a builtin that holds t
 ## More Examples
 
 <details open>
-<summary>Javascript</summary>
+<summary>JavaScript</summary>
 
 To copy the files for [this example ( Part 4 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/js/part4) run
 
@@ -90,7 +90,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/js:main+part4/pa
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM node:13.10.1-alpine3.11
 WORKDIR /js-example
 
@@ -133,7 +133,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/java:main+part4/
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM openjdk:8-jdk-alpine
 RUN apk add --update --no-cache gradle
 WORKDIR /java-example
@@ -173,7 +173,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/python:main+part
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM python:3
 WORKDIR /code
 

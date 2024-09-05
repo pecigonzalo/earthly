@@ -1,0 +1,27 @@
+VERSION --wildcard-builds --build-auto-skip 0.8
+
+FROM alpine
+
+wildcard-build:
+    BUILD ./wildcard/*+test
+
+wildcard-globstar:
+    BUILD ./wildcard/**/*+test
+
+wildcard-glob:
+    BUILD ./wildcard/b*[rz]+test
+
+wildcard-remote:
+    BUILD github.com/earthly/test-remote/wildcard:22403fe8cd4d3fcbc44160be4ee5928ecb1cb975+wildcard-build
+
+wildcard-remote-glob:
+    BUILD github.com/earthly/test-remote/wildcard:22403fe8cd4d3fcbc44160be4ee5928ecb1cb975+wildcard-glob
+
+wildcard-build-pwd:
+    BUILD ./*+test
+
+wildcard-build-rel-dir:
+    BUILD ../../tmp/other-dir/*+test
+
+wildcard-build-auto-skip:
+    BUILD --auto-skip ./*+test

@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/earthly/cloud-api/analytics"
 	"github.com/earthly/earthly/cloud"
+	"github.com/earthly/earthly/domain"
 	"github.com/earthly/earthly/util/cliutil"
 	"github.com/earthly/earthly/util/fileutil"
 	"github.com/earthly/earthly/util/gitutil"
@@ -22,17 +24,27 @@ import (
 	"github.com/pkg/errors"
 )
 
-func detectCI() (string, bool) {
+// DetectCI determines if Earthly is being run from a CI environment. It returns
+// the name of the CI tool and true if we detect one.
+func DetectCI(isEarthlyCIRunner bool) (string, bool) {
+	if isEarthlyCIRunner {
+		return "earthly-ci", true
+	}
 	for k, v := range map[string]string{
-		"GITHUB_WORKFLOW": "github-actions",
-		"CIRCLECI":        "circle-ci",
-		"JENKINS_HOME":    "jenkins",
-		"BUILDKITE":       "buildkite",
-		"DRONE_BRANCH":    "drone",
-		"TRAVIS":          "travis",
-		"GITLAB_CI":       "gitlab",
-		"EARTHLY_IMAGE":   "earthly-image",
-		"AGENT_WORKDIR":   "jenkins", // https://github.com/jenkinsci/docker-agent/blob/master/11/alpine/Dockerfile#L35
+		"GITHUB_WORKFLOW":        "github-actions",
+		"CIRCLECI":               "circle-ci",
+		"JENKINS_HOME":           "jenkins",
+		"BUILDKITE":              "buildkite",
+		"DRONE_BRANCH":           "drone",
+		"TRAVIS":                 "travis",
+		"GITLAB_CI":              "gitlab",
+		"EARTHLY_IMAGE":          "earthly-image",
+		"AGENT_WORKDIR":          "jenkins", // https://github.com/jenkinsci/docker-agent/blob/master/11/alpine/Dockerfile#L35
+		"zuul_execution_branch":  "zuul",    // https://opendev.org/zuul/zuul/src/commit/0dacf6064da112dabe1b79ffc35ec9a6a2b93e4e/zuul/executor/server.py#L3259
+		"CODEBUILD_BUILD_ID":     "aws-codebuild",
+		"SEMAPHORE":              "semaphore-ci",
+		"BUILD_BUILDID":          "azure-pipelines",
+		"BITBUCKET_BUILD_NUMBER": "bitbucket-pipelines",
 	} {
 		if _, ok := os.LookupEnv(k); ok {
 			return v, true
@@ -54,10 +66,32 @@ func detectCI() (string, bool) {
 		}
 	}
 
+	// detached head is often used in CIs. This is another heuristic.
+	dh, _ := isDetachedHead()
+	if dh {
+		return "detached-head", true
+	}
+
 	return "false", false
 }
 
-func getRepo() string {
+func isDetachedHead() (bool, error) {
+	if !isGitInstalled() {
+		return false, errors.New("git not installed")
+	}
+	if !isGitDir() {
+		return false, errors.New("not a git directory")
+	}
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	branch := strings.TrimSpace(string(out))
+	return branch == "HEAD", nil
+}
+
+func getLocalRepo() string {
 	if isGitInstalled() {
 		if !isGitDir() {
 			return ""
@@ -66,7 +100,11 @@ func getRepo() string {
 		cmd := exec.Command("git", "config", "--get", "remote.origin.url")
 		out, err := cmd.Output()
 		if err == nil {
-			return strings.TrimSpace(string(out))
+			repo := strings.TrimSpace(string(out))
+			consistentRepo, err := gitutil.ParseGitRemoteURL(repo)
+			if err == nil {
+				return consistentRepo
+			}
 		}
 	}
 
@@ -79,9 +117,14 @@ func getRepo() string {
 		"TRAVIS_REPO_SLUG",
 		"EARTHLY_GIT_ORIGIN_URL",
 		"CI_REPOSITORY_URL",
+		"SEMAPHORE_GIT_URL",
 	} {
 		if v, ok := os.LookupEnv(k); ok {
-			return strings.TrimSpace(v)
+			repo := strings.TrimSpace(v)
+			consistentRepo, err := gitutil.ParseGitRemoteURL(repo)
+			if err == nil {
+				return consistentRepo
+			}
 		}
 	}
 
@@ -89,7 +132,11 @@ func getRepo() string {
 		pair := strings.SplitN(e, "=", 2)
 		if len(pair) == 2 {
 			if strings.Contains(pair[1], "git") {
-				return strings.TrimSpace(pair[1])
+				repo := strings.TrimSpace(pair[1])
+				consistentRepo, err := gitutil.ParseGitRemoteURL(repo)
+				if err == nil {
+					return consistentRepo
+				}
 			}
 		}
 	}
@@ -109,24 +156,48 @@ func isGitDir() bool {
 	return (err == nil)
 }
 
-func getRepoHash() string {
-	return RepoHashFromCloneURL(getRepo())
+func getRepo(localRepo string, target domain.Target) string {
+	if target.Target == "" || !target.IsRemote() {
+		return localRepo
+	}
+	repoAndPath := target.GitURL
+	// Note that this makes an assumption about the typical repo path structure
+	// and the number of slashes. e.g. github.com/foo/bar.
+	// This does not work well for gitlab sometimes.
+	repoAndPathSplit := strings.SplitN(repoAndPath, "/", 4)
+	if len(repoAndPathSplit) < 3 {
+		return repoAndPath
+	}
+	return strings.Join(repoAndPathSplit[0:3], "/")
 }
 
-// RepoHashFromCloneURL returns the repoHash of a ref
-func RepoHashFromCloneURL(repo string) string {
-	if repo == "unknown" || repo == "" {
-		return repo
+func getTarget(localRepo string, target domain.Target) string {
+	if target.Target == "" {
+		return ""
 	}
-	consistentRepo, err := gitutil.ParseGitRemoteURL(repo)
-	if err == nil {
-		repo = consistentRepo
+	var repoAndPath string
+	if target.Target != "" && target.IsRemote() {
+		repoAndPath = target.GitURL
+	} else {
+		if localRepo == "" || localRepo == "unknown" {
+			return ""
+		}
+		if target.LocalPath != "" && target.LocalPath != "./" {
+			repoAndPath = fmt.Sprintf("%s/%s", localRepo, strings.TrimPrefix(target.LocalPath, "./"))
+		} else {
+			repoAndPath = localRepo
+		}
 	}
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(repo)))
+	// Note that this intentionally excludes any git ref (e.g. branch name) from the target.
+	return fmt.Sprintf("%s+%s", repoAndPath, target.Target)
 }
 
-func getInstallID() (string, error) {
-	earthlyDir, err := cliutil.GetOrCreateEarthlyDir()
+func hashString(s string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(s)))
+}
+
+func getInstallID(installationName string) (string, error) {
+	earthlyDir, err := cliutil.GetOrCreateEarthlyDir(installationName)
 	if err != nil {
 		return "", err
 	}
@@ -181,17 +252,23 @@ type Meta struct {
 	GitSHA           string
 	CommandName      string
 	ExitCode         int
+	Target           domain.Target
 	IsSatellite      bool
 	SatelliteVersion string
 	IsRemoteBuildkit bool
 	Realtime         time.Duration
+	OrgName          string
+	ProjectName      string
+	EarthlyCIRunner  bool
 }
 
 // CollectAnalytics sends analytics to api.earthly.dev
-func CollectAnalytics(ctx context.Context, cloudClient cloud.Client, displayErrors bool, meta Meta) {
+func CollectAnalytics(ctx context.Context, cloudClient *cloud.Client, displayErrors bool, meta Meta, installationName string) {
 	var err error
-	ciName, ci := detectCI()
-	repoHash := getRepoHash()
+	ciName, ci := DetectCI(meta.EarthlyCIRunner)
+	localRepo := getLocalRepo()
+	repoHash := hashString(getRepo(localRepo, meta.Target))
+	targetHash := hashString(getTarget(localRepo, meta.Target))
 	installID, overrideInstallID := os.LookupEnv("EARTHLY_INSTALL_ID")
 	if !overrideInstallID {
 		if ci {
@@ -201,7 +278,7 @@ func CollectAnalytics(ctx context.Context, cloudClient cloud.Client, displayErro
 				installID = fmt.Sprintf("%x", sha256.Sum256([]byte(ciName+repoHash)))
 			}
 		} else {
-			installID, err = getInstallID()
+			installID, err = getInstallID(installationName)
 			if err != nil {
 				if displayErrors {
 					fmt.Fprintf(os.Stderr, "Failed to get install ID: %s\n", err.Error())
@@ -223,23 +300,26 @@ func CollectAnalytics(ctx context.Context, cloudClient cloud.Client, displayErro
 		countsMap, countsMapUnlock := counts.getMap()
 		defer countsMapUnlock()
 
-		err := cloudClient.SendAnalytics(ctx, &cloud.EarthlyAnalytics{
+		err := cloudClient.SendAnalytics(ctx, &analytics.SendAnalyticsRequest{
 			Key:              key,
-			InstallID:        installID,
+			InstallId:        installID,
 			Version:          meta.Version,
 			Platform:         meta.Platform,
 			BuildkitPlatform: meta.BuildkitPlatform,
 			UserPlatform:     meta.UserPlatform,
-			GitSHA:           meta.GitSHA,
-			ExitCode:         meta.ExitCode,
-			CI:               ciName,
+			GitSha:           meta.GitSHA,
+			ExitCode:         int32(meta.ExitCode),
+			CiName:           ciName,
 			IsSatellite:      meta.IsSatellite,
 			SatelliteVersion: meta.SatelliteVersion,
 			IsRemoteBuildkit: meta.IsRemoteBuildkit,
 			RepoHash:         repoHash,
+			TargetHash:       targetHash,
 			ExecutionSeconds: meta.Realtime.Seconds(),
 			Terminal:         isTerminal(),
 			Counts:           countsMap,
+			OrgName:          meta.OrgName,
+			ProjectName:      meta.ProjectName,
 		})
 		if err != nil && displayErrors {
 			fmt.Fprintf(os.Stderr, "error while sending analytics to earthly: %s\n", err.Error())
@@ -248,6 +328,18 @@ func CollectAnalytics(ctx context.Context, cloudClient cloud.Client, displayErro
 
 	ok := syncutil.WaitContext(ctx, &wg)
 	if !ok && displayErrors {
-		fmt.Fprintf(os.Stderr, "Warning: timedout while sending analytics\n")
+		fmt.Fprintf(os.Stderr, "Warning: timed out while sending analytics\n")
 	}
+}
+
+func AddEarthfileProject(org, project string) {
+	projectTracker.AddEarthfileProject(org, project)
+}
+
+func AddCLIProject(org, project string) {
+	projectTracker.AddCLIProject(org, project)
+}
+
+func ProjectDetails() (string, string) {
+	return projectTracker.ProjectDetails()
 }

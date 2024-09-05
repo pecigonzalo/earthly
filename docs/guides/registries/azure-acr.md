@@ -12,7 +12,7 @@ This guide assumes you have already installed the [Azure CLI tool](https://docs.
 No special considerations are needed in the Earthfile itself. You can use `SAVE IMAGE` just like any other repository.
 
 ```
-FROM alpine:3.15
+FROM alpine:3.18
 
 build:
     RUN echo "Hello from Earthly!" > motd
@@ -22,7 +22,7 @@ build:
 
 ## Login and Configure the ACR Credential Helper
 
-ACR does not issue permanent credentials. Instead, it relies on your Azure AD credentials to issue Docker credentials. As an individual user, you will need to log in to your repository first:
+ACR does not issue permanent credentials. Instead, it relies on your Azure AD credentials to issue Docker credentials. As an individual user, you will need to log into your repository first:
 
 ```
 ❯ az acr login --name helloearthly
@@ -51,8 +51,8 @@ Ensure that you have correct permissions to push and pull the images. Please ref
 Earthly also works with Service Principals; and these do not require `az acr login`. You can simply login directly with `docker` like this: 
 
 ```
-RUN --secret AZ_USERNAME=+secrets/earthly-technologies/azure/ci-cd-username \
-    --secret AZ_PASSWORD=+secrets/earthly-technologies/azure/ci-cd-password \
+RUN --secret AZ_USERNAME=earthly-technologies/azure/ci-cd-username \
+    --secret AZ_PASSWORD=earthly-technologies/azure/ci-cd-password \
     docker login helloearthly.azurecr.io --username $AZ_USERNAME --password $AZ_PASSWORD
 ```
 
@@ -63,9 +63,9 @@ Once you are logged in, and have the optional credential helper installed, then 
 ```
 ❯ ../earthly/earthly --push --no-cache +build
            buildkitd | Found buildkit daemon as docker container (earthly-buildkitd)
-         alpine:3.15 | --> Load metadata linux/amd64
-               +base | --> FROM alpine:3.15
-               +base | [██████████] resolve docker.io/library/alpine:3.15@sha256:0bd0e9e03a022c3b0226667621da84fc9bf562a9056130424b5bfbd8bcb0397f ... 100%
+         alpine:3.18 | --> Load metadata linux/amd64
+               +base | --> FROM alpine:3.18
+               +base | [██████████] resolve docker.io/library/alpine:3.18@sha256:0bd0e9e03a022c3b0226667621da84fc9bf562a9056130424b5bfbd8bcb0397f ... 100%
               +build | --> RUN echo "Hello from Earthly!" > motd
               output | --> exporting outputs
               output | [██████████] exporting layers ... 100%

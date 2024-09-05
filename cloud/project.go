@@ -7,7 +7,6 @@ import (
 	"time"
 
 	secretsapi "github.com/earthly/cloud-api/secrets"
-	"github.com/golang/protobuf/jsonpb"
 	"github.com/pkg/errors"
 )
 
@@ -31,7 +30,7 @@ type ProjectMember struct {
 }
 
 // CreateProject creates a new project within the specified organization.
-func (c *client) CreateProject(ctx context.Context, name, orgName string) (*Project, error) {
+func (c *Client) CreateProject(ctx context.Context, name, orgName string) (*Project, error) {
 	u := "/api/v0/projects"
 
 	req := &secretsapi.CreateProjectRequest{
@@ -52,7 +51,7 @@ func (c *client) CreateProject(ctx context.Context, name, orgName string) (*Proj
 
 	res := &secretsapi.CreateProjectResponse{}
 
-	err = jsonpb.UnmarshalString(body, res)
+	err = c.jum.Unmarshal(body, res)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +66,7 @@ func (c *client) CreateProject(ctx context.Context, name, orgName string) (*Proj
 
 // ListProjects returns all projects in the organization that are visible to the
 // logged-in user.
-func (c *client) ListProjects(ctx context.Context, orgName string) ([]*Project, error) {
+func (c *Client) ListProjects(ctx context.Context, orgName string) ([]*Project, error) {
 	u := fmt.Sprintf("/api/v0/projects/%s", orgName)
 
 	status, body, err := c.doCall(ctx, http.MethodGet, u, withAuth())
@@ -81,7 +80,7 @@ func (c *client) ListProjects(ctx context.Context, orgName string) ([]*Project, 
 
 	res := &secretsapi.ListProjectsResponse{}
 
-	err = jsonpb.UnmarshalString(body, res)
+	err = c.jum.Unmarshal(body, res)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +100,7 @@ func (c *client) ListProjects(ctx context.Context, orgName string) ([]*Project, 
 }
 
 // GetProject loads a single project from the projects endpoint.
-func (c *client) GetProject(ctx context.Context, orgName, name string) (*Project, error) {
+func (c *Client) GetProject(ctx context.Context, orgName, name string) (*Project, error) {
 	u := fmt.Sprintf("/api/v0/projects/%s/%s", orgName, name)
 
 	status, body, err := c.doCall(ctx, http.MethodGet, u, withAuth())
@@ -115,7 +114,7 @@ func (c *client) GetProject(ctx context.Context, orgName, name string) (*Project
 
 	res := &secretsapi.GetProjectResponse{}
 
-	err = jsonpb.UnmarshalString(body, res)
+	err = c.jum.Unmarshal(body, res)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +128,7 @@ func (c *client) GetProject(ctx context.Context, orgName, name string) (*Project
 }
 
 // DeleteProject deletes a given project by name.
-func (c *client) DeleteProject(ctx context.Context, orgName, name string) error {
+func (c *Client) DeleteProject(ctx context.Context, orgName, name string) error {
 	u := fmt.Sprintf("/api/v0/projects/%s/%s", orgName, name)
 
 	status, body, err := c.doCall(ctx, http.MethodDelete, u, withAuth())
@@ -145,7 +144,7 @@ func (c *client) DeleteProject(ctx context.Context, orgName, name string) error 
 }
 
 // AddProjectMember adds a new member to the project by email or user ID.
-func (c *client) AddProjectMember(ctx context.Context, orgName, name, userEmail, permission string) error {
+func (c *Client) AddProjectMember(ctx context.Context, orgName, name, userEmail, permission string) error {
 	u := fmt.Sprintf("/api/v0/projects/%s/%s/members", orgName, name)
 
 	req := &secretsapi.AddProjectMemberRequest{
@@ -166,7 +165,7 @@ func (c *client) AddProjectMember(ctx context.Context, orgName, name, userEmail,
 }
 
 // UpdateProjectMember updates an existing member with the new permission
-func (c *client) UpdateProjectMember(ctx context.Context, orgName, name, userEmail, permission string) error {
+func (c *Client) UpdateProjectMember(ctx context.Context, orgName, name, userEmail, permission string) error {
 	u := fmt.Sprintf("/api/v0/projects/%s/%s/members/%s", orgName, name, userEmail)
 
 	req := &secretsapi.AddProjectMemberRequest{
@@ -187,7 +186,7 @@ func (c *client) UpdateProjectMember(ctx context.Context, orgName, name, userEma
 }
 
 // ListProjectMembers will return all project members if the user has permission to do so.
-func (c *client) ListProjectMembers(ctx context.Context, orgName, name string) ([]*ProjectMember, error) {
+func (c *Client) ListProjectMembers(ctx context.Context, orgName, name string) ([]*ProjectMember, error) {
 	u := fmt.Sprintf("/api/v0/projects/%s/%s/members", orgName, name)
 
 	status, body, err := c.doCall(ctx, http.MethodGet, u, withAuth())
@@ -203,7 +202,7 @@ func (c *client) ListProjectMembers(ctx context.Context, orgName, name string) (
 
 	res := &secretsapi.ListProjectMembersResponse{}
 
-	err = jsonpb.UnmarshalString(body, res)
+	err = c.jum.Unmarshal(body, res)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +221,7 @@ func (c *client) ListProjectMembers(ctx context.Context, orgName, name string) (
 }
 
 // RemoveProjectMember will remove a member from a project.
-func (c *client) RemoveProjectMember(ctx context.Context, orgName, name, userEmail string) error {
+func (c *Client) RemoveProjectMember(ctx context.Context, orgName, name, userEmail string) error {
 	u := fmt.Sprintf("/api/v0/projects/%s/%s/members/%s", orgName, name, userEmail)
 
 	status, body, err := c.doCall(ctx, http.MethodDelete, u, withAuth())

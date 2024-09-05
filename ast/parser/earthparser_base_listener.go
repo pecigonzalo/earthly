@@ -1,8 +1,8 @@
-// Code generated from ast/parser/EarthParser.g4 by ANTLR 4.9.1. DO NOT EDIT.
+// Code generated from ast/parser/EarthParser.g4 by ANTLR 4.12.0. DO NOT EDIT.
 
 package parser // EarthParser
 
-import "github.com/antlr/antlr4/runtime/Go/antlr"
+import "github.com/antlr/antlr4/runtime/Go/antlr/v4"
 
 // BaseEarthParserListener is a complete listener for a parse tree produced by EarthParser.
 type BaseEarthParserListener struct{}
@@ -62,6 +62,18 @@ func (s *BaseEarthParserListener) EnterUserCommandHeader(ctx *UserCommandHeaderC
 
 // ExitUserCommandHeader is called when production userCommandHeader is exited.
 func (s *BaseEarthParserListener) ExitUserCommandHeader(ctx *UserCommandHeaderContext) {}
+
+// EnterFunction is called when production function is entered.
+func (s *BaseEarthParserListener) EnterFunction(ctx *FunctionContext) {}
+
+// ExitFunction is called when production function is exited.
+func (s *BaseEarthParserListener) ExitFunction(ctx *FunctionContext) {}
+
+// EnterFunctionHeader is called when production functionHeader is entered.
+func (s *BaseEarthParserListener) EnterFunctionHeader(ctx *FunctionHeaderContext) {}
+
+// ExitFunctionHeader is called when production functionHeader is exited.
+func (s *BaseEarthParserListener) ExitFunctionHeader(ctx *FunctionHeaderContext) {}
 
 // EnterStmts is called when production stmts is entered.
 func (s *BaseEarthParserListener) EnterStmts(ctx *StmtsContext) {}
@@ -363,6 +375,18 @@ func (s *BaseEarthParserListener) EnterArgStmt(ctx *ArgStmtContext) {}
 // ExitArgStmt is called when production argStmt is exited.
 func (s *BaseEarthParserListener) ExitArgStmt(ctx *ArgStmtContext) {}
 
+// EnterSetStmt is called when production setStmt is entered.
+func (s *BaseEarthParserListener) EnterSetStmt(ctx *SetStmtContext) {}
+
+// ExitSetStmt is called when production setStmt is exited.
+func (s *BaseEarthParserListener) ExitSetStmt(ctx *SetStmtContext) {}
+
+// EnterLetStmt is called when production letStmt is entered.
+func (s *BaseEarthParserListener) EnterLetStmt(ctx *LetStmtContext) {}
+
+// ExitLetStmt is called when production letStmt is exited.
+func (s *BaseEarthParserListener) ExitLetStmt(ctx *LetStmtContext) {}
+
 // EnterOptionalFlag is called when production optionalFlag is entered.
 func (s *BaseEarthParserListener) EnterOptionalFlag(ctx *OptionalFlagContext) {}
 
@@ -441,6 +465,12 @@ func (s *BaseEarthParserListener) EnterUserCommandStmt(ctx *UserCommandStmtConte
 // ExitUserCommandStmt is called when production userCommandStmt is exited.
 func (s *BaseEarthParserListener) ExitUserCommandStmt(ctx *UserCommandStmtContext) {}
 
+// EnterFunctionStmt is called when production functionStmt is entered.
+func (s *BaseEarthParserListener) EnterFunctionStmt(ctx *FunctionStmtContext) {}
+
+// ExitFunctionStmt is called when production functionStmt is exited.
+func (s *BaseEarthParserListener) ExitFunctionStmt(ctx *FunctionStmtContext) {}
+
 // EnterDoStmt is called when production doStmt is entered.
 func (s *BaseEarthParserListener) EnterDoStmt(ctx *DoStmtContext) {}
 
@@ -470,18 +500,6 @@ func (s *BaseEarthParserListener) EnterProjectStmt(ctx *ProjectStmtContext) {}
 
 // ExitProjectStmt is called when production projectStmt is exited.
 func (s *BaseEarthParserListener) ExitProjectStmt(ctx *ProjectStmtContext) {}
-
-// EnterPipelineStmt is called when production pipelineStmt is entered.
-func (s *BaseEarthParserListener) EnterPipelineStmt(ctx *PipelineStmtContext) {}
-
-// ExitPipelineStmt is called when production pipelineStmt is exited.
-func (s *BaseEarthParserListener) ExitPipelineStmt(ctx *PipelineStmtContext) {}
-
-// EnterTriggerStmt is called when production triggerStmt is entered.
-func (s *BaseEarthParserListener) EnterTriggerStmt(ctx *TriggerStmtContext) {}
-
-// ExitTriggerStmt is called when production triggerStmt is exited.
-func (s *BaseEarthParserListener) ExitTriggerStmt(ctx *TriggerStmtContext) {}
 
 // EnterExpr is called when production expr is entered.
 func (s *BaseEarthParserListener) EnterExpr(ctx *ExprContext) {}

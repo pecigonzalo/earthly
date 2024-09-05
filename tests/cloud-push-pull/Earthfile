@@ -1,19 +1,7 @@
-VERSION 0.6
-ARG DOCKERHUB_USER_SECRET=+secrets/DOCKERHUB_USER
-ARG DOCKERHUB_TOKEN_SECRET=+secrets/DOCKERHUB_TOKEN
-ARG DOCKERHUB_MIRROR
-ARG DOCKERHUB_MIRROR_INSECURE=false
-ARG DOCKERHUB_AUTH=true
-FROM ../..+earthly-integration-test-base \
-    --DOCKERHUB_AUTH=$DOCKERHUB_AUTH \
-    --DOCKERHUB_USER_SECRET=$DOCKERHUB_USER_SECRET \
-    --DOCKERHUB_TOKEN_SECRET=$DOCKERHUB_TOKEN_SECRET \
-    --DOCKERHUB_MIRROR=$DOCKERHUB_MIRROR \
-    --DOCKERHUB_MIRROR_INSECURE=$DOCKERHUB_MIRROR_INSECURE
+VERSION 0.8
+PROJECT earthly-technologies/core
+FROM --pass-args ..+base
 WORKDIR /test
-
-RUN apk update && \
-    apk add curl python3 bash
 
 all:
     BUILD +google-artifact-registry
@@ -21,15 +9,15 @@ all:
     BUILD +azure-container-registry
     BUILD +amazon-elastic-container-registry
 
-google-base:    
-    RUN curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-324.0.0-linux-x86_64.tar.gz && \
-        tar -xvzf google-cloud-sdk-324.0.0-linux-x86_64.tar.gz && \
+google-base:
+    RUN curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-420.0.0-linux-x86_64.tar.gz && \
+        tar -xvzf google-cloud-sdk-420.0.0-linux-x86_64.tar.gz && \
         ./google-cloud-sdk/install.sh -q && \
         ls -la /test/google-cloud-sdk
-    
+
     ENV PATH $PATH:/test/google-cloud-sdk/bin
 
-    RUN --secret=GCP_KEY=+secrets/earthly-technologies/gcp/ci-cd-key \
+    RUN --secret=GCP_KEY=gcp/ci-cd-key \
         echo $GCP_KEY > key.json
 
     RUN gcloud auth activate-service-account --key-file /test/key.json
@@ -68,11 +56,13 @@ google-container-repository:
 
 azure-container-registry:
     COPY azure-container-registry.earth ./Earthfile
-   
+
    # Note that we dont have to install a cred helper here, also the cred helper wouldnt help here anyways
-    RUN --secret AZ_USERNAME=+secrets/earthly-technologies/azure/ci-cd-username \
-        --secret AZ_PASSWORD=+secrets/earthly-technologies/azure/ci-cd-password \
-        docker login earthlyintegrationtest.azurecr.io --username $AZ_USERNAME --password $AZ_PASSWORD
+    RUN --secret AZ_USERNAME=azure/ci-cd-username \
+        --secret AZ_PASSWORD=azure/ci-cd-password \
+        (test -n "$AZ_USERNAME" || (echo "ERROR: AZ_USERNAME not set"; exit 1)) && \
+        (test -n "$AZ_PASSWORD" || (echo "ERROR: AZ_PASSWORD not set"; exit 1)) && \
+        docker login earthlyintegrationtest.azurecr.io --username "$AZ_USERNAME" --password "$AZ_PASSWORD"
 
     RUN --privileged \
     --entrypoint \
@@ -84,72 +74,40 @@ azure-container-registry:
     --mount=type=tmpfs,target=/tmp/earthly \
     -- -P +pull
 
-amazon-base:
-    ENV GLIBC_VER=2.31-r0
-
-    # install glibc compatibility for alpine
-    RUN apk --no-cache add \
-        binutils \
-        curl \
-    && curl -sL https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub -o /etc/apk/keys/sgerrand.rsa.pub \
-    && curl -sLO https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk \
-    && curl -sLO https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-bin-${GLIBC_VER}.apk \
-    && apk add --no-cache \
-        glibc-${GLIBC_VER}.apk \
-        glibc-bin-${GLIBC_VER}.apk \
-    && curl -sL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o awscliv2.zip \
-    && unzip awscliv2.zip \
-    && aws/install \
-    && rm -rf \
-        awscliv2.zip \
-        aws \
-        /usr/local/aws-cli/v2/*/dist/aws_completer \
-        /usr/local/aws-cli/v2/*/dist/awscli/data/ac.index \
-        /usr/local/aws-cli/v2/*/dist/awscli/examples \
-    && apk --no-cache del \
-        binutils \
-        curl \
-    && rm glibc-${GLIBC_VER}.apk \
-    && rm glibc-bin-${GLIBC_VER}.apk \
-    && rm -rf /var/cache/apk/*
-
-    RUN apk add go
-    RUN go get -u github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login
-    
-    ENV PATH $PATH:/root/go/bin
-
 amazon-elastic-container-registry:
-    FROM +amazon-base
+    RUN apk add go aws-cli
+    RUN go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
+
     COPY amazon-elastic-container-registry.earth ./Earthfile
-   
+
     ENV AWS_REGION us-west-2
 
     # Set up the AWS credential helper
-    # RUN --secret ACCT_ID=+secrets/earthly-technologies/aws/account-id \
+    # RUN --secret ACCT_ID=aws/account-id \
     #    mkdir -p /root/.docker && \
     #    echo "{\"credHelpers\":{\"$ACCT_ID.dkr.ecr.us-west-2.amazonaws.com\": \"ecr-login\"}}" > /root/.docker/config.json
 
 
     # Do a manual login, since the credential helper doesn't work with a pull-through cache.
-    RUN --secret AWS_ACCESS_KEY_ID=+secrets/earthly-technologies/aws/ci-cd-access-key \
-        --secret AWS_SECRET_ACCESS_KEY=+secrets/earthly-technologies/aws/ci-cd-access-secret \
-        --secret ACCT_ID=+secrets/earthly-technologies/aws/account-id \
+    RUN --secret AWS_ACCESS_KEY_ID=aws/ci-cd-access-key \
+        --secret AWS_SECRET_ACCESS_KEY=aws/ci-cd-access-secret \
+        --secret ACCT_ID=aws/account-id \
         --privileged \
-        -- aws ecr get-login-password | docker login --username AWS --password-stdin 404851345508.dkr.ecr.us-west-2.amazonaws.com
+        aws ecr get-login-password | docker login --username AWS --password-stdin 404851345508.dkr.ecr.us-west-2.amazonaws.com
 
-    # Pass through Account ID this way to avoid checking it in to GitHub;
+    # Pass through Account ID this way to avoid checking it into GitHub;
     # its not strictly secret this way but its secret enough
-    RUN --secret AWS_ACCESS_KEY_ID=+secrets/earthly-technologies/aws/ci-cd-access-key \
-    --secret AWS_SECRET_ACCESS_KEY=+secrets/earthly-technologies/aws/ci-cd-access-secret \
-    --secret ACCT_ID=+secrets/earthly-technologies/aws/account-id \
+    RUN --secret AWS_ACCESS_KEY_ID=aws/ci-cd-access-key \
+    --secret AWS_SECRET_ACCESS_KEY=aws/ci-cd-access-secret \
+    --secret ACCT_ID=aws/account-id \
     --privileged \
     --entrypoint \
     --mount=type=tmpfs,target=/tmp/earthly \
     -- --build-arg ACCT_ID --ci --push +push
 
-    RUN --secret AWS_ACCESS_KEY_ID=+secrets/earthly-technologies/aws/ci-cd-access-key \
-    --secret AWS_SECRET_ACCESS_KEY=+secrets/earthly-technologies/aws/ci-cd-access-secret \
-    --secret ACCT_ID=+secrets/earthly-technologies/aws/account-id \
+    RUN --secret AWS_ACCESS_KEY_ID=aws/ci-cd-access-key \
+    --secret AWS_SECRET_ACCESS_KEY=aws/ci-cd-access-secret \
+    --secret ACCT_ID=aws/account-id \
     --privileged \
     --entrypoint \
     --mount=type=tmpfs,target=/tmp/earthly \

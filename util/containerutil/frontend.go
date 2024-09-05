@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"runtime"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
@@ -20,6 +19,7 @@ type ContainerFrontend interface {
 	Config() *CurrentFrontend
 	Information(ctx context.Context) (*FrontendInfo, error)
 
+	ContainerList(ctx context.Context) ([]*ContainerInfo, error)
 	ContainerInfo(ctx context.Context, namesOrIDs ...string) (map[string]*ContainerInfo, error)
 	ContainerRemove(ctx context.Context, force bool, namesOrIDs ...string) error
 	ContainerStop(ctx context.Context, timeoutSec uint, namesOrIDs ...string) error
@@ -42,11 +42,10 @@ type FrontendConfig struct {
 	BuildkitHostCLIValue  string
 	BuildkitHostFileValue string
 
-	DebuggerHostCLIValue  string
-	DebuggerHostFileValue string
-	DebuggerPortFileValue int
-
 	LocalRegistryHostFileValue string
+
+	LocalContainerName string
+	DefaultPort        int
 
 	Console conslogging.ConsoleLogger
 }
@@ -57,7 +56,7 @@ func FrontendForSetting(ctx context.Context, feType string, cfg *FrontendConfig)
 		return autodetectFrontend(ctx, cfg)
 	}
 
-	return frontendIfAvaliable(ctx, feType, cfg)
+	return frontendIfAvailable(ctx, feType, cfg)
 }
 
 func autodetectFrontend(ctx context.Context, cfg *FrontendConfig) (ContainerFrontend, error) {
@@ -67,9 +66,13 @@ func autodetectFrontend(ctx context.Context, cfg *FrontendConfig) (ContainerFron
 		FrontendDockerShell,
 		FrontendPodmanShell,
 	} {
-		fe, err := frontendIfAvaliable(ctx, feType, cfg)
+		fe, err := frontendIfAvailable(ctx, feType, cfg)
 		if err != nil {
 			errs = multierror.Append(errs, err)
+			continue
+		}
+		if dsf, ok := fe.(*dockerShellFrontend); ok && dsf.likelyPodman {
+			// Docker CLI works, but it's likely podman making itself available via docker CLI.
 			continue
 		}
 		return fe, nil
@@ -77,7 +80,7 @@ func autodetectFrontend(ctx context.Context, cfg *FrontendConfig) (ContainerFron
 	return nil, errors.Wrapf(errs, "failed to autodetect a supported frontend")
 }
 
-func frontendIfAvaliable(ctx context.Context, feType string, cfg *FrontendConfig) (ContainerFrontend, error) {
+func frontendIfAvailable(ctx context.Context, feType string, cfg *FrontendConfig) (ContainerFrontend, error) {
 	var newFe func(context.Context, *FrontendConfig) (ContainerFrontend, error)
 	switch feType {
 	case FrontendDockerShell:
@@ -90,19 +93,11 @@ func frontendIfAvaliable(ctx context.Context, feType string, cfg *FrontendConfig
 
 	fe, err := newFe(ctx, cfg)
 	if err != nil {
-		return nil, errors.Wrapf(err, "%s frontend failed to initalize", feType)
+		return nil, errors.Wrapf(err, "%s frontend failed to initialize", feType)
 	}
 	if !fe.IsAvailable(ctx) {
-		return nil, fmt.Errorf("%s frontend not avaliable", feType)
+		return nil, fmt.Errorf("%s frontend not available", feType)
 	}
 
 	return fe, nil
-}
-
-func getPlatform() string {
-	arch := runtime.GOARCH
-	if runtime.GOARCH == "arm" {
-		arch = "arm/v7"
-	}
-	return fmt.Sprintf("linux/%s", arch)
 }

@@ -4,16 +4,16 @@ To copy the files for [this example ( Part 5 )](https://github.com/earthly/earth
 earthly --artifact github.com/earthly/earthly/examples/tutorial/go:main+part5/part5 ./part5
 ```
 
-Examples in [Python](#more-examples), [Javascript](#more-examples) and [Java](#more-examples) are at the bottom of this page.
+Examples in [Python](#more-examples), [JavaScript](#more-examples) and [Java](#more-examples) are at the bottom of this page.
 
 ## Calling on Targets From Other Earthfiles
 
 So far we've seen how the `FROM` command in Earthly has the ability to reference another target's image as its base image, like in the case below where the `+build` target uses the image from the `+deps` target.
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 
 deps:
     COPY go.mod go.sum ./
@@ -25,8 +25,8 @@ deps:
 build:
     FROM +deps
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 
 ```
 
@@ -43,15 +43,15 @@ But `FROM` also has the ability to import targets from Earthfiles in different d
 └── Earthfile
 
 ```
-We can use a target in the Earthfile in `/services/service-one` from inside the Earthfile in the root of our directory.
+We can use a target in the Earthfile in `/services/service-one` from inside the Earthfile in the root of our directory. NOTE: relative paths must use `./` or `../`.
 
 `./services/service-one/Earthfile`
 
 ```Dockerfile
 
-VERSION 0.6
+VERSION 0.8
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 
 deps:
     COPY go.mod go.sum ./
@@ -67,35 +67,35 @@ deps:
 build:
     FROM ./services/service-one+deps
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 ```
 This code tells `FROM` that there is another Earthfile in  the `services/service-one` directory and that the Earthfile  contains a target called `+deps`. In this case, if we were to run `+build` Earthly is smart enough to go into the subdirectory, run the  `+deps` target in that Earthfile, and then use it as the base image for `+build`.
 
-We can also reference an Earthfile in another repo, which works in a similar way.
+We can also reference an Earthfile in another repo, which works in a similar way. If the reference does not begin with one of `/`, `./`, or `../`, then earthly treats it as a repository.  See [the reference](../earthfile/earthfile.md#from) for details.
 
 ```Dockerfile
 build:
     FROM github.com/example/project+remote-target
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 ```
 
 ## Importing Whole Projects
-In addition to importing targets from other files, we can also import an entire file with the `IMPORT` command.
+In addition to importing single targets from other files, we can also import an entire Earthfile with the `IMPORT` command. This is helpful if there are several targets in a separate Earthfile that you want access to in your current file. It also allows you to create an alias.
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 IMPORT ./services/service-one AS my_service
 FROM golang:1.15-alpine3.13
-WORKDIR /go-example
+WORKDIR /go-workdir
 
 build:
     FROM my_service+deps
     COPY main.go .
-    RUN go build -o build/go-example main.go
-    SAVE ARTIFACT build/go-example /go-example AS LOCAL build/go-example
+    RUN go build -o output/example main.go
+    SAVE ARTIFACT output/example AS LOCAL local-output/go-example
 ```
 In this example, we assume there is a `./services/service-one` directory that contains its own Earthfile. We import it and then use the `AS` keyword to give it an alias.
 
@@ -104,7 +104,7 @@ Then, in our `+build` target we can inherit from any target in the imported Eart
 ## More Examples
 
 <details open>
-<summary>Javascript</summary>
+<summary>JavaScript</summary>
 
 To copy the files for [this example ( Part 5 )](https://github.com/earthly/earthly/tree/main/examples/tutorial/js/part5) run
 
@@ -115,7 +115,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/js:main+part5/pa
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM node:13.10.1-alpine3.11
 WORKDIR /js-example
 
@@ -150,7 +150,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/java:main+part5/
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM openjdk:8-jdk-alpine
 RUN apk add --update --no-cache gradle
 WORKDIR /java-example
@@ -185,7 +185,7 @@ earthly --artifact github.com/earthly/earthly/examples/tutorial/python:main+part
 `./Earthfile`
 
 ```Dockerfile
-VERSION 0.6
+VERSION 0.8
 FROM python:3
 WORKDIR /code
 

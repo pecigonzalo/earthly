@@ -6,26 +6,39 @@ import (
 	"net"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/earthly/earthly/analytics"
+	"github.com/earthly/earthly/ast/command"
+	"github.com/earthly/earthly/ast/commandflag"
+	"github.com/earthly/earthly/ast/hint"
 	"github.com/earthly/earthly/ast/spec"
 	"github.com/earthly/earthly/buildcontext"
 	"github.com/earthly/earthly/conslogging"
 	debuggercommon "github.com/earthly/earthly/debugger/common"
 	"github.com/earthly/earthly/domain"
+	"github.com/earthly/earthly/internal/version"
 	"github.com/earthly/earthly/util/flagutil"
+	"github.com/earthly/earthly/util/oidcutil"
 	"github.com/earthly/earthly/util/platutil"
 	"github.com/earthly/earthly/util/shell"
 	"github.com/earthly/earthly/variables"
 
 	"github.com/docker/go-connections/nat"
-	flags "github.com/jessevdk/go-flags"
+	"github.com/google/uuid"
+	"github.com/jessevdk/go-flags"
 	"github.com/pkg/errors"
 )
 
+const maxCommandRenameWarnings = 3
+
 var errCannotAsync = errors.New("cannot run async operation")
+
+// use as default to differentiate between an un specified string flag and a specified flag with empty value
+var defaultZeroStringFlag = uuid.NewString()
 
 // Interpreter interprets Earthly AST's into calls to the converter.
 type Interpreter struct {
@@ -38,8 +51,6 @@ type Interpreter struct {
 	pushOnlyAllowed bool
 	local           bool
 	allowPrivileged bool
-
-	stack string
 
 	withDocker    *WithDockerOpt
 	withDockerRan bool
@@ -55,7 +66,6 @@ func newInterpreter(c *Converter, t domain.Target, allowPrivileged, parallelConv
 	return &Interpreter{
 		converter:          c,
 		target:             t,
-		stack:              c.StackString(),
 		allowPrivileged:    allowPrivileged,
 		parallelConversion: parallelConversion,
 		console:            console,
@@ -64,7 +74,12 @@ func newInterpreter(c *Converter, t domain.Target, allowPrivileged, parallelConv
 }
 
 // Run interprets the commands in the given Earthfile AST, for a specific target.
-func (i *Interpreter) Run(ctx context.Context, ef spec.Earthfile) (err error) {
+func (i *Interpreter) Run(ctx context.Context, ef spec.Earthfile) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			i.converter.RecordTargetFailure(ctx, retErr)
+		}
+	}()
 	if i.target.Target == "base" {
 		i.isBase = true
 		err := i.handleBlock(ctx, ef.BaseRecipe)
@@ -79,33 +94,20 @@ func (i *Interpreter) Run(ctx context.Context, ef spec.Earthfile) (err error) {
 	return i.errorf(ef.SourceLocation, "target %s not found", i.target.Target)
 }
 
-func (i *Interpreter) isPipelineTarget(ctx context.Context, t spec.Target) bool {
-	for _, stmt := range t.Recipe {
-		if stmt.Command != nil && stmt.Command.Name == "PIPELINE" {
-			return true
-		}
-	}
-	return false
-}
-
 func (i *Interpreter) handleTarget(ctx context.Context, t spec.Target) error {
+	ctx = ContextWithSourceLocation(ctx, t.SourceLocation)
 	// Apply implicit FROM +base
-	err := i.converter.From(ctx, "+base", platutil.DefaultPlatform, i.allowPrivileged, nil)
+	err := i.converter.From(ctx, "+base", platutil.DefaultPlatform, i.allowPrivileged, false, nil)
 	if err != nil {
 		return i.wrapError(err, t.SourceLocation, "apply FROM")
 	}
-
-	if i.isPipelineTarget(ctx, t) {
-		return i.handlePipelineBlock(ctx, t.Name, t.Recipe)
-	}
-
 	return i.handleBlock(ctx, t.Recipe)
 }
 
 func (i *Interpreter) handleBlock(ctx context.Context, b spec.Block) error {
-	prevWasArg := true // not exactly true, but makes the logic easier
+	prevWasArgLike := true // not exactly true, but makes the logic easier
 	for index, stmt := range b {
-		if i.parallelConversion && prevWasArg {
+		if i.parallelConversion && prevWasArgLike {
 			err := i.handleBlockParallel(ctx, b, index)
 			if err != nil {
 				return err
@@ -115,7 +117,8 @@ func (i *Interpreter) handleBlock(ctx context.Context, b spec.Block) error {
 		if err != nil {
 			return err
 		}
-		prevWasArg = (stmt.Command != nil && stmt.Command.Name == "ARG")
+		prevWasArgLike = i.isArgLike(stmt.Command)
+
 	}
 	return nil
 }
@@ -131,12 +134,12 @@ func (i *Interpreter) handleBlockParallel(ctx context.Context, b spec.Block, sta
 		stmt := b[index]
 		if stmt.Command != nil {
 			switch stmt.Command.Name {
-			case "ARG", "LOCALLY", "FROM", "FROM DOCKERFILE":
+			case command.Arg, command.Locally, command.From, command.FromDockerfile, command.Let, command.Set:
 				// Cannot do any further parallel builds - these commands need to be
 				// executed to ensure that they don't impact the outcome. As such,
 				// commands following these cannot be executed preemptively.
 				return nil
-			case "BUILD":
+			case command.Build:
 				err := i.handleBuild(ctx, *stmt.Command, true)
 				if err != nil {
 					if errors.Is(err, errCannotAsync) {
@@ -144,12 +147,12 @@ func (i *Interpreter) handleBlockParallel(ctx context.Context, b spec.Block, sta
 					}
 					return err
 				}
-			case "COPY":
+			case command.Copy:
 				// TODO
 			}
 		} else if stmt.With != nil {
 			switch stmt.With.Command.Name {
-			case "DOCKER":
+			case command.Docker:
 				// TODO
 			}
 		} else if stmt.If != nil || stmt.For != nil || stmt.Wait != nil || stmt.Try != nil {
@@ -165,26 +168,31 @@ func (i *Interpreter) handleBlockParallel(ctx context.Context, b spec.Block, sta
 }
 
 func (i *Interpreter) handleStatement(ctx context.Context, stmt spec.Statement) error {
+	ctx = ContextWithSourceLocation(ctx, stmt.SourceLocation)
 	if stmt.Command != nil {
 		return i.handleCommand(ctx, *stmt.Command)
-	} else if stmt.With != nil {
-		return i.handleWith(ctx, *stmt.With)
-	} else if stmt.If != nil {
-		return i.handleIf(ctx, *stmt.If)
-	} else if stmt.For != nil {
-		return i.handleFor(ctx, *stmt.For)
-	} else if stmt.Wait != nil {
-		return i.handleWait(ctx, *stmt.Wait)
-	} else if stmt.Try != nil {
-		return i.handleTry(ctx, *stmt.Try)
-	} else {
-		return i.errorf(stmt.SourceLocation, "unexpected statement type")
 	}
+	if stmt.With != nil {
+		return i.handleWith(ctx, *stmt.With)
+	}
+	if stmt.If != nil {
+		return i.handleIf(ctx, *stmt.If)
+	}
+	if stmt.For != nil {
+		return i.handleFor(ctx, *stmt.For)
+	}
+	if stmt.Wait != nil {
+		return i.handleWait(ctx, *stmt.Wait)
+	}
+	if stmt.Try != nil {
+		return i.handleTry(ctx, *stmt.Try)
+	}
+	return i.errorf(stmt.SourceLocation, "unexpected statement type")
 }
 
 func (i *Interpreter) handleCommand(ctx context.Context, cmd spec.Command) (err error) {
 	// The AST should not be modified by any operation. This is a consistency check.
-	argsCopy := getArgsCopy(cmd)
+	argsCopy := flagutil.GetArgsCopy(cmd)
 	defer func() {
 		if err != nil {
 			return
@@ -201,11 +209,12 @@ func (i *Interpreter) handleCommand(ctx context.Context, cmd spec.Command) (err 
 		}
 	}()
 
+	ctx = ContextWithSourceLocation(ctx, cmd.SourceLocation)
 	analytics.Count("cmd", cmd.Name)
 
 	if i.isWith {
 		switch cmd.Name {
-		case "DOCKER":
+		case command.Docker:
 			return i.handleWithDocker(ctx, cmd)
 		default:
 			return i.errorf(cmd.SourceLocation, "unexpected WITH command %s", cmd.Name)
@@ -213,66 +222,70 @@ func (i *Interpreter) handleCommand(ctx context.Context, cmd spec.Command) (err 
 	}
 
 	switch cmd.Name {
-	case "FROM":
+	case command.From:
 		return i.handleFrom(ctx, cmd)
-	case "RUN":
+	case command.Run:
 		return i.handleRun(ctx, cmd)
-	case "FROM DOCKERFILE":
+	case command.FromDockerfile:
 		return i.handleFromDockerfile(ctx, cmd)
-	case "LOCALLY":
+	case command.Locally:
 		return i.handleLocally(ctx, cmd)
-	case "COPY":
+	case command.Copy:
 		return i.handleCopy(ctx, cmd)
-	case "SAVE ARTIFACT":
+	case command.SaveArtifact:
 		return i.handleSaveArtifact(ctx, cmd)
-	case "SAVE IMAGE":
+	case command.SaveImage:
 		return i.handleSaveImage(ctx, cmd)
-	case "BUILD":
+	case command.Build:
 		return i.handleBuild(ctx, cmd, false)
-	case "WORKDIR":
+	case command.Workdir:
 		return i.handleWorkdir(ctx, cmd)
-	case "USER":
+	case command.User:
 		return i.handleUser(ctx, cmd)
-	case "CMD":
+	case command.Cmd:
 		return i.handleCmd(ctx, cmd)
-	case "ENTRYPOINT":
+	case command.Entrypoint:
 		return i.handleEntrypoint(ctx, cmd)
-	case "EXPOSE":
+	case command.Expose:
 		return i.handleExpose(ctx, cmd)
-	case "VOLUME":
+	case command.Volume:
 		return i.handleVolume(ctx, cmd)
-	case "ENV":
+	case command.Env:
 		return i.handleEnv(ctx, cmd)
-	case "ARG":
+	case command.Arg:
 		return i.handleArg(ctx, cmd)
-	case "LABEL":
+	case command.Let:
+		return i.handleLet(ctx, cmd)
+	case command.Set:
+		return i.handleSet(ctx, cmd)
+	case command.Label:
 		return i.handleLabel(ctx, cmd)
-	case "GIT CLONE":
+	case command.GitClone:
 		return i.handleGitClone(ctx, cmd)
-	case "HEALTHCHECK":
+	case command.HealthCheck:
 		return i.handleHealthcheck(ctx, cmd)
-	case "ADD":
+	case command.Add:
 		return i.handleAdd(ctx, cmd)
-	case "STOPSIGNAL":
+	case command.StopSignal:
 		return i.handleStopsignal(ctx, cmd)
-	case "ONBUILD":
+	case command.OnBuild:
 		return i.handleOnbuild(ctx, cmd)
-	case "SHELL":
+	case command.Shell:
 		return i.handleShell(ctx, cmd)
-	case "COMMAND":
+	case command.Command:
 		return i.handleUserCommand(ctx, cmd)
-	case "DO":
+	case command.Function:
+		return i.handleFunction(ctx, cmd)
+	case command.Do:
 		return i.handleDo(ctx, cmd)
-	case "IMPORT":
+	case command.Import:
 		return i.handleImport(ctx, cmd)
-	case "CACHE":
+	case command.Cache:
 		return i.handleCache(ctx, cmd)
-	case "HOST":
+	case command.Host:
 		return i.handleHost(ctx, cmd)
-	case "PROJECT":
+	case command.Project:
 		return i.handleProject(ctx, cmd)
-	case "TRIGGER":
-		return i.handleTrigger(ctx, cmd)
 	default:
 		return i.errorf(cmd.SourceLocation, "unexpected command %q", cmd.Name)
 	}
@@ -331,8 +344,8 @@ func (i *Interpreter) handleIfExpression(ctx context.Context, expression []strin
 	if len(expression) < 1 {
 		return false, i.errorf(sl, "not enough arguments for IF")
 	}
-	opts := ifOpts{}
-	args, err := parseArgs("IF", &opts, expression)
+	opts := commandflag.IfOpts{}
+	args, err := flagutil.ParseArgsCleaned("IF", &opts, expression)
 	if err != nil {
 		return false, i.wrapError(err, sl, "invalid IF arguments %v", expression)
 	}
@@ -400,10 +413,8 @@ func (i *Interpreter) handleFor(ctx context.Context, forStmt spec.ForStatement) 
 }
 
 func (i *Interpreter) handleForArgs(ctx context.Context, forArgs []string, sl *spec.SourceLocation) (string, []string, error) {
-	opts := forOpts{
-		Separators: "\n\t ",
-	}
-	args, err := parseArgs("FOR", &opts, forArgs)
+	opts := commandflag.NewForOpts()
+	args, err := flagutil.ParseArgsCleaned("FOR", &opts, forArgs)
 	if err != nil {
 		return "", nil, i.wrapError(err, sl, "invalid FOR arguments %v", forArgs)
 	}
@@ -495,8 +506,8 @@ func (i *Interpreter) handleTry(ctx context.Context, tryStmt spec.TryStatement) 
 			if cmd.Command == nil || cmd.Command.Name != "SAVE ARTIFACT" {
 				return i.errorf(tryStmt.SourceLocation, "CATCH/FINALLY body only (currently) supports SAVE ARTIFACT ... AS LOCAL commands; got %s", cmd.Command.Name)
 			}
-			opts := saveArtifactOpts{}
-			args, err := parseArgs("SAVE ARTIFACT", &opts, getArgsCopy(*cmd.Command))
+			opts := commandflag.SaveArtifactOpts{}
+			args, err := flagutil.ParseArgsCleaned("SAVE ARTIFACT", &opts, flagutil.GetArgsCopy(*cmd.Command))
 			if err != nil {
 				return i.wrapError(err, cmd.Command.SourceLocation, "invalid SAVE ARTIFACT arguments %v", cmd.Command.Args)
 			}
@@ -516,6 +527,10 @@ func (i *Interpreter) handleTry(ctx context.Context, tryStmt spec.TryStatement) 
 			}
 			if strings.Contains(saveAsLocalTo, "$") {
 				return i.errorf(cmd.Command.SourceLocation, "TRY/CATCH/FINALLY does not (currently) support expanding args for SAVE ARTIFACT paths")
+			}
+			destIsDir := strings.HasSuffix(saveAsLocalTo, "/") || saveAsLocalTo == "."
+			if destIsDir {
+				saveAsLocalTo = path.Join(saveAsLocalTo, path.Base(saveFrom))
 			}
 			saveArtifacts = append(saveArtifacts, debuggercommon.SaveFilesSettings{
 				Src:      saveFrom,
@@ -552,8 +567,8 @@ func (i *Interpreter) handleFrom(ctx context.Context, cmd spec.Command) error {
 	if i.pushOnlyAllowed {
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
-	opts := fromOpts{}
-	args, err := parseArgs("FROM", &opts, getArgsCopy(cmd))
+	opts := commandflag.FromOpts{}
+	args, err := flagutil.ParseArgsCleaned("FROM", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid FROM arguments %v", cmd.Args)
 	}
@@ -596,8 +611,12 @@ func (i *Interpreter) handleFrom(ctx context.Context, cmd spec.Command) error {
 		return err
 	}
 
+	if !i.converter.ftrs.PassArgs && opts.PassArgs {
+		return i.errorf(cmd.SourceLocation, "the FROM --pass-args flag must be enabled with the VERSION --pass-args feature flag.")
+	}
+
 	i.local = false // FIXME https://github.com/earthly/earthly/issues/2044
-	err = i.converter.From(ctx, imageName, platform, allowPrivileged, expandedBuildArgs)
+	err = i.converter.From(ctx, imageName, platform, allowPrivileged, opts.PassArgs, expandedBuildArgs)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "apply FROM %s", imageName)
 	}
@@ -652,8 +671,8 @@ func (i *Interpreter) handleRun(ctx context.Context, cmd spec.Command) error {
 	if len(cmd.Args) < 1 {
 		return i.errorf(cmd.SourceLocation, "not enough arguments for RUN")
 	}
-	opts := runOpts{}
-	args, err := parseArgsWithValueModifier("RUN", &opts, getArgsCopy(cmd), i.flagValModifierFuncWithContext(ctx))
+	opts := commandflag.RunOpts{OIDC: defaultZeroStringFlag}
+	args, err := flagutil.ParseArgsWithValueModifierCleaned("RUN", &opts, flagutil.GetArgsCopy(cmd), i.flagValModifierFuncWithContext(ctx))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid RUN arguments %v", cmd.Args)
 	}
@@ -686,6 +705,30 @@ func (i *Interpreter) handleRun(ctx context.Context, cmd spec.Command) error {
 		return i.errorf(cmd.SourceLocation, "Permission denied: unwilling to run privileged command; did you reference a remote Earthfile without the --allow-privileged flag?")
 	}
 
+	var noNetwork bool
+	if opts.Network != "" {
+		if !i.converter.ftrs.NoNetwork {
+			return i.errorf(cmd.SourceLocation, "the RUN --network=none flag must be enabled with the VERSION --no-network feature flag.")
+		}
+		if opts.Network != "none" {
+			return i.errorf(cmd.SourceLocation, "invalid network value %s; only \"none\" is currently supported", opts.Network)
+		}
+		noNetwork = true
+	}
+
+	if opts.WithAWS && !i.converter.opt.Features.RunWithAWS {
+		return i.errorf(cmd.SourceLocation, "RUN --aws requires the --run-with-aws feature flag")
+	}
+
+	awsOIDCInfo, err := i.handleOIDC(ctx, &cmd, &opts)
+	if err != nil {
+		return err
+	}
+
+	if opts.RawOutput && !i.converter.opt.Features.RawOutput {
+		return i.errorf(cmd.SourceLocation, "RUN --raw-output requires the --raw-output feature flag")
+	}
+
 	if i.withDocker == nil {
 		if opts.WithDocker {
 			return i.errorf(cmd.SourceLocation, "--with-docker is obsolete. Please use WITH DOCKER ... RUN ... END instead")
@@ -699,12 +742,16 @@ func (i *Interpreter) handleRun(ctx context.Context, cmd spec.Command) error {
 			WithShell:            withShell,
 			WithEntrypoint:       opts.WithEntrypoint,
 			Privileged:           opts.Privileged,
+			NoNetwork:            noNetwork,
 			Push:                 opts.Push,
 			WithSSH:              opts.WithSSH,
 			NoCache:              opts.NoCache,
 			Interactive:          opts.Interactive,
 			InteractiveKeep:      opts.InteractiveKeep,
 			InteractiveSaveFiles: i.interactiveSaveFiles,
+			WithAWSCredentials:   opts.WithAWS,
+			OIDCInfo:             awsOIDCInfo,
+			RawOutput:            opts.RawOutput,
 		}
 		err = i.converter.Run(ctx, opts)
 		if err != nil {
@@ -728,6 +775,9 @@ func (i *Interpreter) handleRun(ctx context.Context, cmd spec.Command) error {
 		i.withDocker.NoCache = opts.NoCache
 		i.withDocker.Interactive = opts.Interactive
 		i.withDocker.interactiveKeep = opts.InteractiveKeep
+		i.withDocker.WithAWSCredentials = opts.WithAWS
+		i.withDocker.OIDCInfo = awsOIDCInfo
+
 		// TODO: Could this be allowed in the future, if dynamic build args
 		//       are expanded ahead of time?
 		allowParallel := true
@@ -754,18 +804,52 @@ func (i *Interpreter) handleRun(ctx context.Context, cmd spec.Command) error {
 	return nil
 }
 
+// handleOIDC parse the oidc string value into a struct
+// Returns error if the value cannot be parsed of if the feature flag is not set
+func (i *Interpreter) handleOIDC(ctx context.Context, cmd *spec.Command, opts *commandflag.RunOpts) (*oidcutil.AWSOIDCInfo, error) {
+	if opts.OIDC == defaultZeroStringFlag {
+		// oidc is not in use, set it to empty string just in case
+		opts.OIDC = ""
+		return nil, nil
+	}
+	if !i.converter.opt.Features.RunWithAWSOIDC {
+		return nil, i.errorf(cmd.SourceLocation, "RUN --aws-oidc requires the --run-with-aws-oidc feature flag")
+	}
+	if !opts.WithAWS {
+		return nil, i.errorf(cmd.SourceLocation, "RUN --oidc also requires the --aws RUN flag")
+	}
+	expanded, err := i.expandArgs(ctx, opts.OIDC, false, false)
+	if err != nil {
+		return nil, i.errorf(cmd.SourceLocation, "failed to expand oidc arg in RUN: %s", opts.OIDC)
+	}
+	opts.OIDC = expanded
+	// we currently only support oidc for AWS
+	awsInfo, err := oidcutil.ParseAWSOIDCInfo(opts.OIDC)
+	if err != nil {
+		return nil, i.errorf(cmd.SourceLocation, "invalid value for oidc flag: %v", err)
+	}
+
+	return awsInfo, nil
+}
+
 func (i *Interpreter) handleFromDockerfile(ctx context.Context, cmd spec.Command) error {
 	if i.pushOnlyAllowed {
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
-	opts := fromDockerfileOpts{}
-	args, err := parseArgs("FROM DOCKERFILE", &opts, getArgsCopy(cmd))
+	opts := commandflag.FromDockerfileOpts{}
+	args, err := flagutil.ParseArgsCleaned("FROM DOCKERFILE", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid FROM DOCKERFILE arguments %v", cmd.Args)
 	}
 	if len(args) < 1 {
 		return i.errorf(cmd.SourceLocation, "invalid number of arguments for FROM DOCKERFILE")
 	}
+
+	if !i.converter.ftrs.AllowPrivilegedFromDockerfile && opts.AllowPrivileged {
+		return i.errorf(cmd.SourceLocation, "the FROM DOCKERFILE --allow-privileged flag must be enabled with the VERSION --allow-privileged-from-dockerfile feature flag.")
+	}
+	allowPrivileged := opts.AllowPrivileged && i.allowPrivileged
+
 	path, err := i.expandArgs(ctx, args[0], false, false)
 	if err != nil {
 		return i.errorf(cmd.SourceLocation, "failed to expand FROM DOCKERFILE path arg %s", args[0])
@@ -808,7 +892,7 @@ func (i *Interpreter) handleFromDockerfile(ctx context.Context, cmd spec.Command
 		return i.wrapError(err, cmd.SourceLocation, "failed to expand target %s", opts.Target)
 	}
 	i.local = false
-	err = i.converter.FromDockerfile(ctx, path, expandedPath, expandedTarget, platform, expandedBuildArgs)
+	err = i.converter.FromDockerfile(ctx, path, expandedPath, expandedTarget, platform, allowPrivileged, expandedBuildArgs)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "from dockerfile")
 	}
@@ -836,8 +920,8 @@ func (i *Interpreter) handleCopy(ctx context.Context, cmd spec.Command) error {
 	if i.pushOnlyAllowed {
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
-	opts := copyOpts{}
-	args, err := parseArgs("COPY", &opts, getArgsCopy(cmd))
+	opts := commandflag.CopyOpts{}
+	args, err := flagutil.ParseArgsCleaned("COPY", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid COPY arguments %v", cmd.Args)
 	}
@@ -848,6 +932,7 @@ func (i *Interpreter) handleCopy(ctx context.Context, cmd spec.Command) error {
 		return i.errorf(cmd.SourceLocation, "COPY --from not implemented. Use COPY artifacts form instead")
 	}
 	srcs := args[:len(args)-1]
+	srcArtifacts := make([]domain.Artifact, len(srcs))
 	srcFlagArgs := make([][]string, len(srcs))
 	dest, err := i.expandArgs(ctx, args[len(args)-1], false, false)
 	if err != nil {
@@ -882,17 +967,16 @@ func (i *Interpreter) handleCopy(ctx context.Context, cmd spec.Command) error {
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "parse platform %s", expandedPlatform)
 	}
-
 	allClassical := true
 	allArtifacts := true
 	for index, src := range srcs {
 		var artifactSrc domain.Artifact
 		var parseErr error
-		if isInParansForm(src) {
+		if flagutil.IsInParamsForm(src) {
 			// COPY (<src> <flag-args>) ...
-			artifactStr, extraArgs, err := parseParans(src)
+			artifactStr, extraArgs, err := flagutil.ParseParams(src)
 			if err != nil {
-				return i.wrapError(err, cmd.SourceLocation, "parse parans %s", src)
+				return i.wrapError(err, cmd.SourceLocation, "parse params %s", src)
 			}
 			expandedArtifact, err := i.expandArgs(ctx, artifactStr, true, false)
 			if err != nil {
@@ -900,7 +984,7 @@ func (i *Interpreter) handleCopy(ctx context.Context, cmd spec.Command) error {
 			}
 			artifactSrc, parseErr = domain.ParseArtifact(expandedArtifact)
 			if parseErr != nil {
-				// Must parse in the parans case.
+				// Must parse in the params case.
 				return i.wrapError(err, cmd.SourceLocation, "parse artifact")
 			}
 			srcFlagArgs[index] = extraArgs
@@ -914,6 +998,7 @@ func (i *Interpreter) handleCopy(ctx context.Context, cmd spec.Command) error {
 		// If it parses as an artifact, treat as artifact.
 		if parseErr == nil {
 			srcs[index] = artifactSrc.String()
+			srcArtifacts[index] = artifactSrc
 			allClassical = false
 		} else {
 			expandedSrc, err := i.expandArgs(ctx, src, false, false)
@@ -931,6 +1016,11 @@ func (i *Interpreter) handleCopy(ctx context.Context, cmd spec.Command) error {
 	}
 	if !allClassical && !allArtifacts {
 		return i.errorf(cmd.SourceLocation, "combining artifacts and build context arguments in a single COPY command is not allowed: %v", srcs)
+	}
+	if slices.ContainsFunc(strings.Split(dest, "/"), func(s string) bool {
+		return s == "~" || strings.HasPrefix(s, "~")
+	}) {
+		i.console.Warnf(`destination path %q contains a "~" which does not expand to a home directory`, dest)
 	}
 	if allArtifacts {
 		if dest == "" || dest == "." || len(srcs) > 1 {
@@ -952,15 +1042,34 @@ func (i *Interpreter) handleCopy(ctx context.Context, cmd spec.Command) error {
 			}
 			srcBuildArgs := append(parsedFlagArgs, expandedBuildArgs...)
 
-			if i.local {
-				err = i.converter.CopyArtifactLocal(ctx, src, dest, platform, allowPrivileged, srcBuildArgs, opts.IsDirCopy)
-				if err != nil {
-					return i.wrapError(err, cmd.SourceLocation, "copy artifact locally")
+			if !i.converter.ftrs.PassArgs && opts.PassArgs {
+				return i.errorf(cmd.SourceLocation, "the COPY --pass-args flag must be enabled with the VERSION --pass-args feature flag.")
+			}
+			expandedSrcs := []string{src}
+			if strings.Contains(srcArtifacts[index].Target.String(), "*") {
+				if !i.converter.ftrs.WildcardCopy {
+					return i.errorf(cmd.SourceLocation, "wildcard COPY commands are not enabled")
 				}
-			} else {
-				err = i.converter.CopyArtifact(ctx, src, dest, platform, allowPrivileged, srcBuildArgs, opts.IsDirCopy, opts.KeepTs, opts.KeepOwn, expandedChown, fileModeParsed, opts.IfExists, opts.SymlinkNoFollow)
+				expandedArtifacts, err := i.converter.ExpandWildcardArtifacts(ctx, srcArtifacts[index])
 				if err != nil {
-					return i.wrapError(err, cmd.SourceLocation, "copy artifact")
+					return i.wrapError(err, cmd.SourceLocation, "failed to expand wildcard COPY %q", srcArtifacts[index].Target.String())
+				}
+				expandedSrcs = make([]string, 0, len(expandedArtifacts))
+				for _, artifact := range expandedArtifacts {
+					expandedSrcs = append(expandedSrcs, artifact.String())
+				}
+			}
+			for _, expandedSrc := range expandedSrcs {
+				if i.local {
+					err = i.converter.CopyArtifactLocal(ctx, expandedSrc, dest, platform, allowPrivileged, opts.PassArgs, srcBuildArgs, opts.IsDirCopy)
+					if err != nil {
+						return i.wrapError(err, cmd.SourceLocation, "copy artifact locally")
+					}
+				} else {
+					err = i.converter.CopyArtifact(ctx, expandedSrc, dest, platform, allowPrivileged, opts.PassArgs, srcBuildArgs, opts.IsDirCopy, opts.KeepTs, opts.KeepOwn, expandedChown, fileModeParsed, opts.IfExists, opts.SymlinkNoFollow)
+					if err != nil {
+						return i.wrapError(err, cmd.SourceLocation, "copy artifact")
+					}
 				}
 			}
 		}
@@ -980,7 +1089,7 @@ func (i *Interpreter) handleCopy(ctx context.Context, cmd spec.Command) error {
 	return nil
 }
 
-func parseSaveArtifactArgs(args []string) (string, string, string, bool) {
+func parseSaveArtifactArgs(args []string) (from, to, asLocal string, _ bool) {
 	saveAsLocalTo := ""
 	saveTo := "./"
 	if len(args) >= 4 {
@@ -1002,8 +1111,8 @@ func parseSaveArtifactArgs(args []string) (string, string, string, bool) {
 }
 
 func (i *Interpreter) handleSaveArtifact(ctx context.Context, cmd spec.Command) error {
-	opts := saveArtifactOpts{}
-	args, err := parseArgs("SAVE ARTIFACT", &opts, getArgsCopy(cmd))
+	opts := commandflag.SaveArtifactOpts{}
+	args, err := flagutil.ParseArgsCleaned("SAVE ARTIFACT", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid SAVE ARTIFACT arguments %v", cmd.Args)
 	}
@@ -1043,6 +1152,13 @@ func (i *Interpreter) handleSaveArtifact(ctx context.Context, cmd spec.Command) 
 		return nil
 	}
 
+	if i.converter.ftrs.SaveArtifactKeepOwn {
+		if opts.KeepOwn {
+			fmt.Fprintf(os.Stderr, "Deprecation: SAVE ARTIFACT --keep-own is now applied by default, setting it no longer has any effect\n")
+		}
+		opts.KeepOwn = true
+	}
+
 	err = i.converter.SaveArtifact(ctx, saveFrom, expandedSaveTo, expandedSaveAsLocalTo, opts.KeepTs, opts.KeepOwn, opts.IfExists, opts.SymlinkNoFollow, opts.Force, i.pushOnlyAllowed)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "apply SAVE ARTIFACT")
@@ -1051,8 +1167,8 @@ func (i *Interpreter) handleSaveArtifact(ctx context.Context, cmd spec.Command) 
 }
 
 func (i *Interpreter) handleSaveImage(ctx context.Context, cmd spec.Command) error {
-	opts := saveImageOpts{}
-	args, err := parseArgs("SAVE IMAGE", &opts, getArgsCopy(cmd))
+	opts := commandflag.SaveImageOpts{}
+	args, err := flagutil.ParseArgsCleaned("SAVE IMAGE", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid SAVE IMAGE arguments %v", cmd.Args)
 	}
@@ -1079,6 +1195,24 @@ func (i *Interpreter) handleSaveImage(ctx context.Context, cmd spec.Command) err
 		fmt.Fprintf(os.Stderr, "Deprecation: using SAVE IMAGE with no arguments is no longer necessary and can be safely removed\n")
 		return nil
 	}
+
+	if opts.WithoutEarthlyLabels {
+		if !i.converter.ftrs.AllowWithoutEarthlyLabels {
+			return i.errorf(cmd.SourceLocation, "the SAVE IMAGE --without-earthly-labels flag must be enabled with the VERSION --allow-without-earthly-labels feature flag.")
+		}
+		// deliberately don't add any labels (i.e. do nothing here)
+	} else {
+		labels := map[string]string{
+			"dev.earthly.version":  version.Version,
+			"dev.earthly.git-sha":  version.GitSha,
+			"dev.earthly.built-by": version.BuiltBy,
+		}
+		err = i.converter.Label(ctx, labels)
+		if err != nil {
+			return i.wrapError(err, cmd.SourceLocation, "failed to create dev.earthly.* labels during SAVE IMAGE")
+		}
+	}
+
 	err = i.converter.SaveImage(ctx, imageNames, opts.Push, opts.Insecure, opts.CacheHint, opts.CacheFrom, opts.NoManifestList)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "save image")
@@ -1089,12 +1223,24 @@ func (i *Interpreter) handleSaveImage(ctx context.Context, cmd spec.Command) err
 	return nil
 }
 
+func newOnExecutionSuccess(numSuccessRequired int, saveHashFn func()) func(context.Context) {
+	var mu sync.Mutex
+	return func(ctx context.Context) {
+		mu.Lock()
+		defer mu.Unlock()
+		numSuccessRequired -= 1
+		if numSuccessRequired == 0 {
+			saveHashFn()
+		}
+	}
+}
+
 func (i *Interpreter) handleBuild(ctx context.Context, cmd spec.Command, async bool) error {
 	if i.pushOnlyAllowed {
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
-	opts := buildOpts{}
-	args, err := parseArgs("BUILD", &opts, getArgsCopy(cmd))
+	opts := commandflag.BuildOpts{}
+	args, err := flagutil.ParseArgsCleaned("BUILD", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid BUILD arguments %v", cmd.Args)
 	}
@@ -1105,6 +1251,13 @@ func (i *Interpreter) handleBuild(ctx context.Context, cmd spec.Command, async b
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "failed to expand BUILD target %s", args[0])
 	}
+	// Expand wildcards into a set of BUILD spec.Command's, one for each discovered Earthfile.
+	if strings.Contains(fullTargetName, "*") {
+		if !i.converter.ftrs.WildcardBuilds {
+			return i.errorf(cmd.SourceLocation, "wildcard BUILD commands are not enabled")
+		}
+		return i.handleWildcardBuilds(ctx, fullTargetName, cmd, async)
+	}
 	platformsSlice := make([]platutil.Platform, 0, len(opts.Platforms))
 	for index, p := range opts.Platforms {
 		expandedPlatform, err := i.expandArgs(ctx, p, false, async)
@@ -1112,16 +1265,17 @@ func (i *Interpreter) handleBuild(ctx context.Context, cmd spec.Command, async b
 			return i.wrapError(err, cmd.SourceLocation, "failed to expand BUILD platform %s", p)
 		}
 		opts.Platforms[index] = expandedPlatform
-		platform, err := i.converter.platr.Parse(p)
+		platform, err := i.converter.platr.Parse(expandedPlatform)
 		if err != nil {
 			return i.wrapError(err, cmd.SourceLocation, "parse platform %s", p)
 		}
 		platformsSlice = append(platformsSlice, platform)
 	}
-	if async && !(isSafeAsyncBuildArgsKVStyle(opts.BuildArgs) && isSafeAsyncBuildArgs(args[1:])) {
+	asyncSafeArgs := isSafeAsyncBuildArgsKVStyle(opts.BuildArgs) && isSafeAsyncBuildArgs(args[1:])
+	if async && (!asyncSafeArgs || opts.AutoSkip) {
 		return errCannotAsync
 	}
-	if i.local && !(isSafeAsyncBuildArgsKVStyle(opts.BuildArgs) && isSafeAsyncBuildArgs(args[1:])) {
+	if i.local && !asyncSafeArgs {
 		return i.errorf(cmd.SourceLocation, "BUILD args do not currently support shelling-out in combination with LOCALLY")
 	}
 	expandedBuildArgs, err := i.expandArgsSlice(ctx, opts.BuildArgs, true, async)
@@ -1141,7 +1295,7 @@ func (i *Interpreter) handleBuild(ctx context.Context, cmd spec.Command, async b
 		platformsSlice = []platutil.Platform{platutil.DefaultPlatform}
 	}
 
-	crossProductBuildArgs, err := buildArgMatrix(expandedBuildArgs)
+	crossProductBuildArgs, err := flagutil.BuildArgMatrix(expandedBuildArgs)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "build arg matrix")
 	}
@@ -1151,21 +1305,59 @@ func (i *Interpreter) handleBuild(ctx context.Context, cmd spec.Command, async b
 		return err
 	}
 
-	for _, bas := range crossProductBuildArgs {
+	if !i.converter.ftrs.PassArgs && opts.PassArgs {
+		return i.errorf(cmd.SourceLocation, "the BUILD --pass-args flag must be enabled with the VERSION --pass-args feature flag.")
+	}
+
+	if !i.converter.ftrs.BuildAutoSkip && opts.AutoSkip {
+		return i.errorf(cmd.SourceLocation, "the BUILD --auto-skip flag must be enabled with the VERSION --build-auto-skip feature flag.")
+	}
+
+	for _, buildArgs := range crossProductBuildArgs {
+		saveHashFn := func() {}
+		if opts.AutoSkip {
+			skip, fn, err := i.converter.checkAutoSkip(ctx, fullTargetName, allowPrivileged, opts.PassArgs, buildArgs)
+			if err != nil {
+				return i.wrapError(err, cmd.SourceLocation, "failed to determine whether target can be skipped")
+			}
+			if skip {
+				continue
+			}
+			saveHashFn = fn
+		}
+
+		onExecutionSuccess := newOnExecutionSuccess(len(platformsSlice), saveHashFn)
+
 		for _, platform := range platformsSlice {
 			if async {
-				err = i.converter.BuildAsync(ctx, fullTargetName, platform, allowPrivileged, bas, buildCmd, nil, nil)
+				err := i.converter.BuildAsync(ctx, fullTargetName, platform, allowPrivileged, opts.PassArgs, buildArgs, buildCmd, nil, nil)
 				if err != nil {
 					return i.wrapError(err, cmd.SourceLocation, "apply BUILD %s", fullTargetName)
 				}
-			} else {
-				err = i.converter.Build(ctx, fullTargetName, platform, allowPrivileged, bas)
-				if err != nil {
-					return i.wrapError(err, cmd.SourceLocation, "apply BUILD %s", fullTargetName)
-				}
+				continue
+			}
+			err := i.converter.Build(ctx, fullTargetName, platform, allowPrivileged, opts.PassArgs, buildArgs, onExecutionSuccess)
+			if err != nil {
+				return i.wrapError(err, cmd.SourceLocation, "apply BUILD %s", fullTargetName)
 			}
 		}
 	}
+	return nil
+}
+
+func (i *Interpreter) handleWildcardBuilds(ctx context.Context, fullTargetName string, cmd spec.Command, async bool) error {
+
+	children, err := i.converter.ExpandWildcardCmds(ctx, fullTargetName, cmd)
+	if err != nil {
+		return i.wrapError(err, cmd.SourceLocation, "failed to expand wildcard BUILD %q", fullTargetName)
+	}
+
+	for _, child := range children {
+		if err := i.handleBuild(ctx, child, async); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1210,7 +1402,7 @@ func (i *Interpreter) handleCmd(ctx context.Context, cmd spec.Command) error {
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
 	withShell := !cmd.ExecMode
-	cmdArgs := getArgsCopy(cmd)
+	cmdArgs := flagutil.GetArgsCopy(cmd)
 	if withShell {
 		for index, arg := range cmdArgs {
 			expandedCmd, err := i.expandArgs(ctx, arg, false, false)
@@ -1232,7 +1424,7 @@ func (i *Interpreter) handleEntrypoint(ctx context.Context, cmd spec.Command) er
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
 	withShell := !cmd.ExecMode
-	entArgs := getArgsCopy(cmd)
+	entArgs := flagutil.GetArgsCopy(cmd)
 	if withShell {
 		for index, arg := range entArgs {
 			expandedEntrypoint, err := i.expandArgs(ctx, arg, false, false)
@@ -1256,7 +1448,7 @@ func (i *Interpreter) handleExpose(ctx context.Context, cmd spec.Command) error 
 	if len(cmd.Args) == 0 {
 		return i.errorf(cmd.SourceLocation, "no arguments provided to the EXPOSE command")
 	}
-	ports := getArgsCopy(cmd)
+	ports := flagutil.GetArgsCopy(cmd)
 	for index, port := range ports {
 		expandedPort, err := i.expandArgs(ctx, port, false, false)
 		if err != nil {
@@ -1291,7 +1483,7 @@ func (i *Interpreter) handleVolume(ctx context.Context, cmd spec.Command) error 
 	if len(cmd.Args) == 0 {
 		return i.errorf(cmd.SourceLocation, "no arguments provided to the VOLUME command")
 	}
-	volumes := getArgsCopy(cmd)
+	volumes := flagutil.GetArgsCopy(cmd)
 	for index, volume := range volumes {
 		expandedVolume, err := i.expandArgs(ctx, volume, false, false)
 		if err != nil {
@@ -1334,52 +1526,11 @@ func (i *Interpreter) handleEnv(ctx context.Context, cmd spec.Command) error {
 	return nil
 }
 
-var errInvalidSyntax = errors.New("invalid syntax")
-var errRequiredArgHasDefault = errors.New("required ARG cannot have a default value")
-var errGlobalArgNotInBase = errors.New("global ARG can only be set in the base target")
-
-// parseArgArgs parses the ARG command's arguments
-// and returns the argOpts, key, value (or nil if missing), or error
-func parseArgArgs(ctx context.Context, cmd spec.Command, isBaseTarget bool, explicitGlobalFeature bool) (argOpts, string, *string, error) {
-	opts := argOpts{}
-	args, err := parseArgs("ARG", &opts, getArgsCopy(cmd))
-	if err != nil {
-		return argOpts{}, "", nil, err
-	}
-	if opts.Global {
-		// since the global flag is part of the struct, we need to manually return parsing error if it's used while the feature flag is off
-		if !explicitGlobalFeature {
-			return argOpts{}, "", nil, errors.New("unknown flag --global")
-		}
-		// global flag can only bet set on base targets
-		if !isBaseTarget {
-			return argOpts{}, "", nil, errGlobalArgNotInBase
-		}
-	} else if !explicitGlobalFeature {
-		// if the feature flag is off, all base target args are considered global
-		opts.Global = isBaseTarget
-	}
-	switch len(args) {
-	case 3:
-		if args[1] != "=" {
-			return argOpts{}, "", nil, errInvalidSyntax
-		}
-		if opts.Required {
-			return argOpts{}, "", nil, errRequiredArgHasDefault
-		}
-		return opts, args[0], &args[2], nil
-	case 1:
-		return opts, args[0], nil, nil
-	default:
-		return argOpts{}, "", nil, errInvalidSyntax
-	}
-}
-
 func (i *Interpreter) handleArg(ctx context.Context, cmd spec.Command) error {
 	if i.pushOnlyAllowed {
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
-	opts, key, valueOrNil, err := parseArgArgs(ctx, cmd, i.isBase, i.converter.ftrs.ExplicitGlobal)
+	opts, key, valueOrNil, err := flagutil.ParseArgArgs(ctx, cmd, i.isBase, i.converter.ftrs.ExplicitGlobal)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid ARG arguments %v", cmd.Args)
 	}
@@ -1399,6 +1550,65 @@ func (i *Interpreter) handleArg(ctx context.Context, cmd spec.Command) error {
 	return nil
 }
 
+func (i *Interpreter) handleLet(ctx context.Context, cmd spec.Command) error {
+	if i.pushOnlyAllowed {
+		return i.pushOnlyErr(cmd.SourceLocation)
+	}
+	var opts commandflag.LetOpts
+	argsCpy := flagutil.GetArgsCopy(cmd)
+	args, err := flagutil.ParseArgsCleaned("LET", &opts, argsCpy)
+	if err != nil {
+		return errors.Wrap(err, "failed to parse LET args")
+	}
+	if len(args) != 3 || args[1] != "=" {
+		return hint.Wrap(flagutil.ErrInvalidSyntax, "LET requires a variable assignment, e.g. LET foo = bar")
+	}
+
+	key := args[0]
+	baseVal := args[2]
+	val, err := i.expandArgs(ctx, baseVal, true, false)
+	if err != nil {
+		return i.wrapError(err, cmd.SourceLocation, "failed to expand LET value %q", baseVal)
+	}
+
+	err = i.converter.Let(ctx, key, val)
+	if err != nil {
+		return i.wrapError(err, cmd.SourceLocation, "apply LET")
+	}
+	return nil
+}
+
+func parseSetArgs(ctx context.Context, cmd spec.Command) (name, value string, _ error) {
+	var opts commandflag.SetOpts
+	argsCpy := flagutil.GetArgsCopy(cmd)
+	args, err := flagutil.ParseArgsCleaned("SET", &opts, argsCpy)
+	if err != nil {
+		return "", "", errors.Wrap(err, "failed to parse SET args")
+	}
+	if len(args) != 3 {
+		return "", "", flagutil.ErrInvalidSyntax
+	}
+	if args[1] != "=" {
+		return "", "", flagutil.ErrInvalidSyntax
+	}
+	return args[0], args[2], nil
+}
+
+func (i *Interpreter) handleSet(ctx context.Context, cmd spec.Command) error {
+	if !i.converter.ftrs.ArgScopeSet {
+		return errors.New("unknown command SET")
+	}
+	key, value, err := parseSetArgs(ctx, cmd)
+	if err != nil {
+		return errors.Wrapf(err, "failed to parse SET arguments")
+	}
+	newVal, err := i.expandArgs(ctx, value, true, false)
+	if err != nil {
+		return i.wrapError(err, cmd.SourceLocation, "failed to expand SET %s", value)
+	}
+	return i.converter.UpdateArg(ctx, key, newVal, i.isBase)
+}
+
 func (i *Interpreter) handleLabel(ctx context.Context, cmd spec.Command) error {
 	if i.pushOnlyAllowed {
 		return i.pushOnlyErr(cmd.SourceLocation)
@@ -1413,6 +1623,9 @@ func (i *Interpreter) handleLabel(ctx context.Context, cmd spec.Command) error {
 			key, err = i.expandArgs(ctx, arg, false, false)
 			if err != nil {
 				return i.wrapError(err, cmd.SourceLocation, "failed to expand LABEL key %s", arg)
+			}
+			if strings.HasPrefix(key, "dev.earthly.") {
+				return i.wrapError(err, cmd.SourceLocation, "LABEL keys starting with \"dev.earthly.\" are reserved")
 			}
 			nextEqual = true
 			nextKey = false
@@ -1447,8 +1660,8 @@ func (i *Interpreter) handleGitClone(ctx context.Context, cmd spec.Command) erro
 	if i.pushOnlyAllowed {
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
-	opts := gitCloneOpts{}
-	args, err := parseArgs("GIT CLONE", &opts, getArgsCopy(cmd))
+	opts := commandflag.GitCloneOpts{}
+	args, err := flagutil.ParseArgsCleaned("GIT CLONE", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid GIT CLONE arguments %v", cmd.Args)
 	}
@@ -1469,12 +1682,12 @@ func (i *Interpreter) handleGitClone(ctx context.Context, cmd spec.Command) erro
 		return i.wrapError(err, cmd.SourceLocation, "failed to expand GIT CLONE dest: %s", opts.Branch)
 	}
 
-	convertedGitURL, _, err := i.gitLookup.ConvertCloneURL(gitURL)
+	convertedGitURL, _, sshCommand, err := i.gitLookup.ConvertCloneURL(gitURL)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "unable to use %v with configured earthly credentials from ~/.earthly/config.yml", cmd.Args)
 	}
 
-	err = i.converter.GitClone(ctx, convertedGitURL, gitBranch, gitCloneDest, opts.KeepTs)
+	err = i.converter.GitClone(ctx, convertedGitURL, sshCommand, gitBranch, gitCloneDest, opts.KeepTs)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "git clone")
 	}
@@ -1485,8 +1698,8 @@ func (i *Interpreter) handleHealthcheck(ctx context.Context, cmd spec.Command) e
 	if i.pushOnlyAllowed {
 		return i.pushOnlyErr(cmd.SourceLocation)
 	}
-	opts := healthCheckOpts{}
-	args, err := parseArgs("HEALTHCHECK", &opts, getArgsCopy(cmd))
+	opts := commandflag.HealthCheckOpts{}
+	args, err := flagutil.ParseArgsCleaned("HEALTHCHECK", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid HEALTHCHECK arguments %v", cmd.Args)
 	}
@@ -1519,7 +1732,7 @@ func (i *Interpreter) handleHealthcheck(ctx context.Context, cmd spec.Command) e
 		}
 		cmdArgs[index] = expandedArg
 	}
-	err = i.converter.Healthcheck(ctx, isNone, cmdArgs, opts.Interval, opts.Timeout, opts.StartPeriod, opts.Retries)
+	err = i.converter.Healthcheck(ctx, isNone, cmdArgs, opts.Interval, opts.Timeout, opts.StartPeriod, opts.Retries, opts.StartInterval)
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "apply HEALTHCHECK")
 	}
@@ -1533,8 +1746,8 @@ func (i *Interpreter) handleWithDocker(ctx context.Context, cmd spec.Command) er
 	if i.withDocker != nil {
 		return i.errorf(cmd.SourceLocation, "cannot use WITH DOCKER within WITH DOCKER")
 	}
-	opts := withDockerOpts{}
-	args, err := parseArgs("WITH DOCKER", &opts, getArgsCopy(cmd))
+	opts := commandflag.WithDockerOpts{}
+	args, err := flagutil.ParseArgsCleaned("WITH DOCKER", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid WITH DOCKER arguments %v", cmd.Args)
 	}
@@ -1594,7 +1807,7 @@ func (i *Interpreter) handleWithDocker(ctx context.Context, cmd spec.Command) er
 		})
 	}
 	for _, loadStr := range opts.Loads {
-		loadImg, loadTarget, flagArgs, err := parseLoad(loadStr)
+		loadImg, loadTarget, flagArgs, err := flagutil.ParseLoad(loadStr)
 		if err != nil {
 			return i.wrapError(err, cmd.SourceLocation, "parse load")
 		}
@@ -1613,13 +1826,24 @@ func (i *Interpreter) handleWithDocker(ctx context.Context, cmd spec.Command) er
 			return err
 		}
 
+		if !i.converter.ftrs.PassArgs && opts.PassArgs {
+			return i.errorf(cmd.SourceLocation, "the WITH DOCKER --pass-args flag must be enabled with the VERSION --pass-args feature flag.")
+		}
+
 		i.withDocker.Loads = append(i.withDocker.Loads, DockerLoadOpt{
 			Target:          loadTarget,
 			ImageName:       loadImg,
 			Platform:        platform,
 			BuildArgs:       loadBuildArgs,
 			AllowPrivileged: allowPrivileged,
+			PassArgs:        opts.PassArgs,
 		})
+	}
+	if opts.CacheID != "" {
+		if !i.converter.ftrs.DockerCache {
+			return i.errorf(cmd.SourceLocation, "the WITH DOCKER --cache-id flag must be enabled with the VERSION --docker-cache feature flag.")
+		}
+		i.withDocker.CacheID = opts.CacheID
 	}
 	return nil
 }
@@ -1640,13 +1864,17 @@ func (i *Interpreter) handleShell(ctx context.Context, cmd spec.Command) error {
 	return i.errorf(cmd.SourceLocation, "command SHELL not yet supported")
 }
 
-func (i *Interpreter) handleUserCommand(ctx context.Context, cmd spec.Command) error {
+func (i *Interpreter) handleUserCommand(_ context.Context, cmd spec.Command) error {
 	return i.errorf(cmd.SourceLocation, "command COMMAND not allowed in a target definition")
 }
 
+func (i *Interpreter) handleFunction(_ context.Context, cmd spec.Command) error {
+	return i.errorf(cmd.SourceLocation, "command FUNCTION not allowed in a target definition")
+}
+
 func (i *Interpreter) handleDo(ctx context.Context, cmd spec.Command) error {
-	opts := doOpts{}
-	args, err := parseArgs("DO", &opts, getArgsCopy(cmd))
+	opts := commandflag.DoOpts{}
+	args, err := flagutil.ParseArgsCleaned("DO", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid DO arguments %v", cmd.Args)
 	}
@@ -1688,17 +1916,22 @@ func (i *Interpreter) handleDo(ctx context.Context, cmd spec.Command) error {
 		allowPrivileged = allowPrivileged && resolvedAllowPrivileged
 	}
 
-	for _, uc := range bc.Earthfile.UserCommands {
+	if !i.converter.ftrs.PassArgs && opts.PassArgs {
+		return i.errorf(cmd.SourceLocation, "the DO --pass-args flag must be enabled with the VERSION --pass-args feature flag.")
+	}
+
+	for _, uc := range bc.Earthfile.Functions {
 		if uc.Name == command.Command {
-			return i.handleDoUserCommand(ctx, command, relCommand, uc, cmd, parsedFlagArgs, allowPrivileged)
+			sourceFilePath := bc.Ref.ProjectCanonical() + "/Earthfile"
+			return i.handleDoFunction(ctx, command, relCommand, uc, cmd, parsedFlagArgs, allowPrivileged, opts.PassArgs, sourceFilePath, bc.Features.UseFunctionKeyword)
 		}
 	}
 	return i.errorf(cmd.SourceLocation, "user command %s not found", ucName)
 }
 
 func (i *Interpreter) handleImport(ctx context.Context, cmd spec.Command) error {
-	opts := importOpts{}
-	args, err := parseArgs("IMPORT", &opts, getArgsCopy(cmd))
+	opts := commandflag.ImportOpts{}
+	args, err := flagutil.ParseArgsCleaned("IMPORT", &opts, flagutil.GetArgsCopy(cmd))
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "invalid IMPORT arguments %v", cmd.Args)
 	}
@@ -1729,91 +1962,17 @@ func (i *Interpreter) handleImport(ctx context.Context, cmd spec.Command) error 
 }
 
 func (i *Interpreter) handleProject(ctx context.Context, cmd spec.Command) error {
-	projectVal, err := i.expandArgs(ctx, cmd.Args[0], false, false)
-	if err != nil {
-		return i.wrapError(err, cmd.SourceLocation, "failed to expand PROJECT %s", cmd.Args[0])
-	}
-
+	// Note: Expanding args for PROJECT is not allowed. The value needs to be
+	// lifted straight from the AST.
+	projectVal := cmd.Args[0]
 	parts := strings.Split(projectVal, "/")
 	if len(parts) != 2 {
 		return i.errorf(cmd.SourceLocation, "unexpected format for PROJECT statement, should be: <organization>/<project>")
 	}
 
-	err = i.converter.Project(ctx, parts[0], parts[1])
+	err := i.converter.Project(ctx, parts[0], parts[1])
 	if err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "failed to process PROJECT")
-	}
-
-	return nil
-}
-
-func (i *Interpreter) handlePipelineBlock(ctx context.Context, name string, block spec.Block) error {
-	if len(block) == 0 {
-		return errors.New("pipeline targets require sub-commands")
-	}
-
-	if block[0].Command == nil || block[0].Command.Name != "PIPELINE" {
-		return i.errorf(block[0].Command.SourceLocation, "PIPELINE must be the first command in a pipeline target")
-	}
-
-	for _, stmt := range block {
-		if stmt.Command == nil {
-			return errors.New("pipeline targets do not support IF, WITH, FOR, or WAIT commands")
-		}
-		cmd := *stmt.Command
-		var err error
-		switch cmd.Name {
-		case "PIPELINE":
-			err = i.handlePipeline(ctx, cmd)
-		case "TRIGGER":
-			err = i.handleTrigger(ctx, cmd)
-		case "ARG":
-			err = i.handleArg(ctx, cmd)
-		case "BUILD":
-			err = i.handleBuild(ctx, cmd, false)
-		default:
-			return i.errorf(cmd.SourceLocation, "pipeline targets only support PIPELINE, TRIGGER, ARG, and BUILD commands")
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (i *Interpreter) handlePipeline(ctx context.Context, cmd spec.Command) error {
-
-	if len(cmd.Args) > 1 {
-		return i.errorf(cmd.SourceLocation, "invalid number of PIPELINE arguments")
-	}
-
-	opts := &pipelineOpts{}
-	_, err := parseArgs("PIPELINE", opts, getArgsCopy(cmd))
-	if err != nil {
-		return i.wrapError(err, cmd.SourceLocation, "invalid PIPELINE arguments")
-	}
-
-	return i.converter.Pipeline(ctx)
-}
-
-func (i *Interpreter) handleTrigger(ctx context.Context, cmd spec.Command) error {
-
-	if len(cmd.Args) < 1 {
-		return i.errorf(cmd.SourceLocation, "TRIGGER requires at least 1 argument")
-	}
-
-	switch cmd.Args[0] {
-	case "manual":
-		if len(cmd.Args) != 1 {
-			return i.errorf(cmd.SourceLocation, "invalid argument")
-		}
-	case "pr", "push":
-		if len(cmd.Args) != 2 {
-			return i.errorf(cmd.SourceLocation, "'pr' and 'push' triggers require a branch name")
-		}
-	default:
-		return i.errorf(cmd.SourceLocation, "valid triggers include: 'manual', 'pr', or 'push'")
 	}
 
 	return nil
@@ -1823,20 +1982,37 @@ func (i *Interpreter) handleCache(ctx context.Context, cmd spec.Command) error {
 	if !i.converter.ftrs.UseCacheCommand {
 		return i.errorf(cmd.SourceLocation, "the CACHE command is not supported in this version")
 	}
-	if len(cmd.Args) != 1 {
-		return i.errorf(cmd.SourceLocation, "invalid number of arguments for CACHE: %s", cmd.Args)
+	opts := commandflag.CacheOpts{}
+	args, err := flagutil.ParseArgsCleaned("CACHE", &opts, flagutil.GetArgsCopy(cmd))
+	if err != nil {
+		return i.wrapError(err, cmd.SourceLocation, "invalid CACHE arguments %v", cmd.Args)
+	}
+	if len(args) != 1 {
+		return i.errorf(cmd.SourceLocation, "invalid number of arguments for CACHE: %s", args)
 	}
 	if i.local {
 		return i.errorf(cmd.SourceLocation, "CACHE command not supported with LOCALLY")
 	}
-	dir, err := i.expandArgs(ctx, cmd.Args[0], false, false)
+	dir, err := i.expandArgs(ctx, args[0], false, false)
 	if err != nil {
-		return i.wrapError(err, cmd.SourceLocation, "failed to expand CACHE %s", cmd.Args[0])
+		return i.wrapError(err, cmd.SourceLocation, "failed to expand CACHE directory %s", args[0])
+	}
+	expandedMode, err := i.expandArgs(ctx, opts.Mode, false, false)
+	if err != nil {
+		return i.wrapError(err, cmd.SourceLocation, "failed to expand CACHE mode %s", opts.Mode)
+	} else {
+		opts.Mode = expandedMode
 	}
 	if !path.IsAbs(dir) {
 		dir = path.Clean(path.Join("/", i.converter.mts.Final.MainImage.Config.WorkingDir, dir))
 	}
-	if err := i.converter.Cache(ctx, dir); err != nil {
+	if opts.ID != "" {
+		opts.ID, err = i.expandArgs(ctx, opts.ID, false, false)
+		if err != nil {
+			return i.wrapError(err, cmd.SourceLocation, "failed to expand CACHE id %s", opts.ID)
+		}
+	}
+	if err := i.converter.Cache(ctx, dir, opts); err != nil {
 		return i.wrapError(err, cmd.SourceLocation, "apply CACHE")
 	}
 	return nil
@@ -1852,10 +2028,14 @@ func (i *Interpreter) handleHost(ctx context.Context, cmd spec.Command) error {
 	if i.local {
 		return i.errorf(cmd.SourceLocation, "HOST command not supported with LOCALLY")
 	}
-
-	host := cmd.Args[0]
-	ipStr := cmd.Args[1]
-
+	host, err := i.expandArgs(ctx, cmd.Args[0], true, false)
+	if err != nil {
+		return i.errorf(cmd.SourceLocation, "unable to expand host name for HOST: %s", cmd.Args)
+	}
+	ipStr, err := i.expandArgs(ctx, cmd.Args[1], true, false)
+	if err != nil {
+		return i.errorf(cmd.SourceLocation, "unable to expand IP addr for HOST: %s", cmd.Args)
+	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return i.errorf(cmd.SourceLocation, "invalid HOST ip %s", ipStr)
@@ -1869,26 +2049,36 @@ func (i *Interpreter) handleHost(ctx context.Context, cmd spec.Command) error {
 
 // ----------------------------------------------------------------------------
 
-func (i *Interpreter) handleDoUserCommand(ctx context.Context, command domain.Command, relCommand domain.Command, uc spec.UserCommand, do spec.Command, buildArgs []string, allowPrivileged bool) error {
-	if allowPrivileged && !i.allowPrivileged {
-		return i.errorf(uc.SourceLocation, "invalid privileged in COMMAND") // this shouldn't happen, but check just in case
+func (i *Interpreter) handleDoFunction(ctx context.Context, command domain.Command, relCommand domain.Command, uc spec.Function, do spec.Command, buildArgs []string, allowPrivileged, passArgs bool, sourceLocationFile string, useFunctionCmd bool) error {
+	cmdName := "FUNCTION"
+	if !useFunctionCmd {
+		cmdName = "COMMAND"
 	}
-	if len(uc.Recipe) == 0 || uc.Recipe[0].Command == nil || uc.Recipe[0].Command.Name != "COMMAND" {
-		return i.errorf(uc.SourceLocation, "command recipes must start with COMMAND")
+	if allowPrivileged && !i.allowPrivileged {
+		return i.errorf(uc.SourceLocation, "invalid privileged in %s", cmdName) // this shouldn't happen, but check just in case
+	}
+	if len(uc.Recipe) == 0 || uc.Recipe[0].Command == nil || uc.Recipe[0].Command.Name != cmdName {
+		return i.errorf(uc.SourceLocation, "%s recipes must start with %s", strings.ToLower(cmdName), cmdName)
+	}
+	if !useFunctionCmd && len(i.converter.opt.FilesWithCommandRenameWarning) < maxCommandRenameWarnings && !i.converter.opt.FilesWithCommandRenameWarning[sourceLocationFile] {
+		i.console.Printf(
+			`Note that the COMMAND keyword will be replaced by FUNCTION starting with VERSION 0.8.
+To start using the FUNCTION keyword now (experimental) please use VERSION --use-function-keyword 0.7 in %s. Note that switching now may cause breakages for your colleagues if they are using older Earthly versions.
+`, sourceLocationFile)
+		i.converter.opt.FilesWithCommandRenameWarning[sourceLocationFile] = true
 	}
 	if len(uc.Recipe[0].Command.Args) > 0 {
-		return i.errorf(uc.Recipe[0].SourceLocation, "COMMAND takes no arguments")
+		return i.errorf(uc.Recipe[0].SourceLocation, "%s takes no arguments", cmdName)
 	}
 	scopeName := fmt.Sprintf(
-		"%s (%s line %d:%d)",
+		"%s (%s:%d:%d)",
 		command.StringCanonical(), do.SourceLocation.File, do.SourceLocation.StartLine, do.SourceLocation.StartColumn)
-	err := i.converter.EnterScopeDo(ctx, command, baseTarget(relCommand), allowPrivileged, scopeName, buildArgs)
+	err := i.converter.EnterScopeDo(ctx, command, baseTarget(relCommand), allowPrivileged, passArgs, scopeName, buildArgs)
 	if err != nil {
 		return i.wrapError(err, uc.SourceLocation, "enter scope")
 	}
 	prevAllowPrivileged := i.allowPrivileged
 	i.allowPrivileged = allowPrivileged
-	i.stack = i.converter.StackString()
 	err = i.handleBlock(ctx, uc.Recipe[1:])
 	if err != nil {
 		return err
@@ -1897,7 +2087,6 @@ func (i *Interpreter) handleDoUserCommand(ctx context.Context, command domain.Co
 	if err != nil {
 		return i.wrapError(err, uc.SourceLocation, "exit scope")
 	}
-	i.stack = i.converter.StackString()
 	i.allowPrivileged = prevAllowPrivileged
 	return nil
 }
@@ -1916,12 +2105,18 @@ func (i *Interpreter) expandArgsSlice(ctx context.Context, words []string, keepP
 	return ret, nil
 }
 
+func (i *Interpreter) stack() string {
+	return i.converter.varCollection.StackString()
+}
+
 func (i *Interpreter) errorf(sl *spec.SourceLocation, format string, args ...interface{}) *InterpreterError {
-	return Errorf(sl, i.stack, format, args...)
+	targetID := i.converter.mts.Final.ID
+	return Errorf(sl, targetID, i.stack(), format, args...)
 }
 
 func (i *Interpreter) wrapError(cause error, sl *spec.SourceLocation, format string, args ...interface{}) *InterpreterError {
-	return WrapError(cause, sl, i.stack, format, args...)
+	targetID := i.converter.mts.Final.ID
+	return WrapError(cause, sl, targetID, i.stack(), format, args...)
 }
 
 func (i *Interpreter) pushOnlyErr(sl *spec.SourceLocation) error {
@@ -1931,7 +2126,7 @@ func (i *Interpreter) pushOnlyErr(sl *spec.SourceLocation) error {
 func (i *Interpreter) expandArgs(ctx context.Context, word string, keepPlusEscape, async bool) (string, error) {
 	runOpts := ConvertRunOpts{
 		CommandName: "expandargs",
-		Args:        nil, // this gets replaced whenver a shell-out is encountered
+		Args:        nil, // this gets replaced whenever a shell-out is encountered
 		Locally:     i.local,
 		Transient:   !i.local,
 		WithShell:   true,
@@ -1950,6 +2145,20 @@ func (i *Interpreter) expandArgs(ctx context.Context, word string, keepPlusEscap
 	return unescapeSlashPlus(ret), nil
 }
 
+// isArgLike returns true if the command is ARG/LET/SET
+func (i *Interpreter) isArgLike(cmd *spec.Command) bool {
+	if cmd == nil {
+		return false
+	}
+
+	switch cmd.Name {
+	case command.Arg, command.Let, command.Set:
+		return true
+	}
+
+	return false
+}
+
 func escapeSlashPlus(str string) string {
 	// TODO: This is not entirely correct in a string like "\\\\+".
 	return strings.ReplaceAll(str, "\\+", "\\\\+")
@@ -1958,172 +2167,6 @@ func escapeSlashPlus(str string) string {
 func unescapeSlashPlus(str string) string {
 	// TODO: This is not entirely correct in a string like "\\\\+".
 	return strings.ReplaceAll(str, "\\+", "+")
-}
-
-func parseLoad(loadStr string) (image string, target string, extraArgs []string, err error) {
-	words := strings.SplitN(loadStr, " ", 2)
-	if len(words) == 0 {
-		return "", "", nil, nil
-	}
-	firstWord := words[0]
-	splitFirstWord := strings.SplitN(firstWord, "=", 2)
-	if len(splitFirstWord) < 2 {
-		// <target-name>
-		// (will infer image name from SAVE IMAGE of that target)
-		image = ""
-		target = loadStr
-	} else {
-		// <image-name>=<target-name>
-		image = splitFirstWord[0]
-		if len(words) == 1 {
-			target = splitFirstWord[1]
-		} else {
-			words[0] = splitFirstWord[1]
-			target = strings.Join(words, " ")
-		}
-	}
-	if isInParansForm(target) {
-		target, extraArgs, err = parseParans(target)
-		if err != nil {
-			return "", "", nil, err
-		}
-	}
-	return image, target, extraArgs, nil
-}
-
-func getArgsCopy(cmd spec.Command) []string {
-	argsCopy := make([]string, len(cmd.Args))
-	copy(argsCopy, cmd.Args)
-	return argsCopy
-}
-
-type argGroup struct {
-	key    string
-	values []*string
-}
-
-func buildArgMatrix(args []string) ([][]string, error) {
-	groupedArgs := make([]argGroup, 0, len(args))
-	for _, arg := range args {
-		k, v, err := parseKeyValue(arg)
-		if err != nil {
-			return nil, err
-		}
-
-		found := false
-		for i, g := range groupedArgs {
-			if g.key == k {
-				groupedArgs[i].values = append(groupedArgs[i].values, v)
-				found = true
-				break
-			}
-		}
-		if !found {
-			groupedArgs = append(groupedArgs, argGroup{
-				key:    k,
-				values: []*string{v},
-			})
-		}
-	}
-	return crossProduct(groupedArgs, nil), nil
-}
-
-func crossProduct(ga []argGroup, prefix []string) [][]string {
-	if len(ga) == 0 {
-		return [][]string{prefix}
-	}
-	var ret [][]string
-	for _, v := range ga[0].values {
-		newPrefix := prefix[:]
-		var kv string
-		if v == nil {
-			kv = ga[0].key
-		} else {
-			kv = fmt.Sprintf("%s=%s", ga[0].key, *v)
-		}
-		newPrefix = append(newPrefix, kv)
-
-		cp := crossProduct(ga[1:], newPrefix)
-		ret = append(ret, cp...)
-	}
-	return ret
-}
-
-func parseKeyValue(arg string) (string, *string, error) {
-	var name string
-	splitArg := strings.SplitN(arg, "=", 2)
-	if len(splitArg) < 1 {
-		return "", nil, errors.Errorf("invalid build arg %s", splitArg)
-	}
-	name = splitArg[0]
-	var value *string
-	if len(splitArg) == 2 {
-		value = &splitArg[1]
-	}
-	return name, value, nil
-}
-
-func isInParansForm(str string) bool {
-	return (strings.HasPrefix(str, "\"(") && strings.HasSuffix(str, "\")")) ||
-		(strings.HasPrefix(str, "(") && strings.HasSuffix(str, ")"))
-}
-
-// parseParans turns "(+target --flag=something)" into "+target" and []string{"--flag=something"},
-// or "\"(+target --flag=something)\"" into "+target" and []string{"--flag=something"}
-func parseParans(str string) (string, []string, error) {
-	if !isInParansForm(str) {
-		return "", nil, errors.New("parans atom not in ( ... )")
-	}
-	if strings.HasPrefix(str, "\"(") {
-		str = str[2 : len(str)-2] // remove \"( and )\"
-	} else {
-		str = str[1 : len(str)-1] // remove ( and )
-	}
-	var parts []string
-	var part []rune
-	nextEscaped := false
-	inQuotes := false
-	for _, char := range str {
-		switch char {
-		case '"':
-			if !nextEscaped {
-				inQuotes = !inQuotes
-			}
-			nextEscaped = false
-		case '\\':
-			nextEscaped = true
-		case ' ', '\t', '\n':
-			if !inQuotes && !nextEscaped {
-				if len(part) > 0 {
-					parts = append(parts, string(part))
-					part = []rune{}
-					nextEscaped = false
-					continue
-				} else {
-					nextEscaped = false
-					continue
-				}
-			}
-			nextEscaped = false
-		default:
-			nextEscaped = false
-		}
-		part = append(part, char)
-	}
-	if nextEscaped {
-		return "", nil, errors.New("unterminated escape sequence")
-	}
-	if inQuotes {
-		return "", nil, errors.New("no ending quotes")
-	}
-	if len(part) > 0 {
-		parts = append(parts, string(part))
-	}
-
-	if len(parts) < 1 {
-		return "", nil, errors.New("invalid empty parans")
-	}
-	return parts[0], parts[1:], nil
 }
 
 // requiresShellOutOrCmdInvalid returns true if
@@ -2137,7 +2180,7 @@ func requiresShellOutOrCmdInvalid(s string) bool {
 		required = true
 		return "", nil
 	}
-	_, err := shlex.ProcessWordWithMap(s, map[string]string{})
+	_, err := shlex.ProcessWordWithMap(s, map[string]string{}, variables.ShellOutEnvs)
 	return required || err != nil
 }
 
@@ -2193,58 +2236,4 @@ func baseTarget(ref domain.Reference) domain.Target {
 		LocalPath: ref.GetLocalPath(),
 		Target:    "base",
 	}
-}
-
-func parseArgs(cmdName string, opts interface{}, args []string) ([]string, error) {
-	processed := processParansAndQuotes(args)
-	return flagutil.ParseArgs(cmdName, opts, processed)
-}
-
-func parseArgsWithValueModifier(cmdName string, opts interface{}, args []string, argumentModFunc flagutil.ArgumentModFunc) ([]string, error) {
-	processed := processParansAndQuotes(args)
-	return flagutil.ParseArgsWithValueModifier(cmdName, opts, processed, argumentModFunc)
-}
-
-// processParansAndQuotes takes in a slice of strings, and rearranges the slices
-// depending on quotes and paranthesis.
-// For example "hello ", "wor(", "ld)" becomes "hello ", "wor( ld)".
-func processParansAndQuotes(args []string) []string {
-	curQuote := rune(0)
-	allowedQuotes := map[rune]rune{
-		'"':  '"',
-		'\'': '\'',
-		'(':  ')',
-	}
-	ret := make([]string, 0, len(args))
-	var newArg []rune
-	for _, arg := range args {
-		for _, char := range arg {
-			newArg = append(newArg, char)
-			if curQuote == 0 {
-				_, isQuote := allowedQuotes[char]
-				if isQuote {
-					curQuote = char
-				}
-			} else {
-				if char == allowedQuotes[curQuote] {
-					curQuote = rune(0)
-				}
-			}
-		}
-		if curQuote == 0 {
-			ret = append(ret, string(newArg))
-			newArg = []rune{}
-		} else {
-			// Unterminated quote - join up two args into one.
-			// Add a space between joined-up args.
-			newArg = append(newArg, ' ')
-		}
-	}
-	if curQuote != 0 {
-		// Unterminated quote case.
-		newArg = newArg[:len(newArg)-1] // remove last space
-		ret = append(ret, string(newArg))
-	}
-
-	return ret
 }

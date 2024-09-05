@@ -1,5 +1,5 @@
-VERSION 0.6
-FROM alpine:3.15
+VERSION 0.8
+FROM alpine:3.18
 
 save:
     RUN echo "aaa" > ok
@@ -55,3 +55,15 @@ classic-copy-exists:
 classic-copy-not-exist:
     COPY --if-exists ./in/this-file-does-not-exist .
     RUN test ! -f this-file-does-not-exist
+
+artifact-copy-exists:
+    COPY --if-exists +save/ok .
+    RUN test -f ok
+
+artifact-copy-not-exist:
+    COPY --if-exists +save/not_ok .
+    RUN test ! -f not_ok
+
+artifact-copy-not-exist-wildcard:
+    COPY --if-exists +save/*_ok .
+    RUN test ! -f not_ok

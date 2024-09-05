@@ -2,6 +2,7 @@ package gitutil
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/earthly/earthly/domain"
 	"github.com/pkg/errors"
+	"golang.org/x/exp/slices"
 )
 
 var (
@@ -25,23 +27,33 @@ var (
 	ErrCouldNotDetectGitShortHash = errors.New("Could not auto-detect or parse Git short hash")
 	// ErrCouldNotDetectGitBranch is an error returned when git branch could not be detected.
 	ErrCouldNotDetectGitBranch = errors.New("Could not auto-detect or parse Git branch")
+	// ErrCouldNotDetectGitTags is an error returned when git tags could not be detected.
+	ErrCouldNotDetectGitTags = errors.New("Could not auto-detect or parse Git tags")
+	// ErrCouldNotDetectGitRefs is an error returned when git refs could not be detected.
+	ErrCouldNotDetectGitRefs = errors.New("Could not auto-detect or parse Git refs")
 )
 
 // GitMetadata is a collection of git information about a certain directory.
 type GitMetadata struct {
-	BaseDir   string
-	RelDir    string
-	RemoteURL string
-	GitURL    string
-	Hash      string
-	ShortHash string
-	Branch    []string
-	Tags      []string
-	Timestamp string
+	BaseDir              string
+	RelDir               string
+	RemoteURL            string
+	GitURL               string
+	Hash                 string
+	ShortHash            string
+	BranchOverrideTagArg bool
+	Branch               []string
+	Tags                 []string
+	CommitterTimestamp   string
+	AuthorTimestamp      string
+	AuthorEmail          string
+	AuthorName           string
+	CoAuthors            []string
+	Refs                 []string
 }
 
 // Metadata performs git metadata detection on the provided directory.
-func Metadata(ctx context.Context, dir string) (*GitMetadata, error) {
+func Metadata(ctx context.Context, dir, gitBranchOverride string) (*GitMetadata, error) {
 	err := detectGitBinary(ctx)
 	if err != nil {
 		return nil, err
@@ -77,17 +89,42 @@ func Metadata(ctx context.Context, dir string) (*GitMetadata, error) {
 		retErr = err
 		// Keep going.
 	}
-	branch, err := detectGitBranch(ctx, dir)
+	branch, err := detectGitBranch(ctx, dir, gitBranchOverride)
 	if err != nil {
 		retErr = err
 		// Keep going.
 	}
 	tags, err := detectGitTags(ctx, dir)
 	if err != nil {
-		// Most likely no tags. Keep going.
-		tags = nil
+		retErr = err
+		// Keep going.
 	}
-	timestamp, err := detectGitTimestamp(ctx, dir)
+	committerTimestamp, err := detectGitTimestamp(ctx, dir, committer)
+	if err != nil {
+		retErr = err
+		// Keep going.
+	}
+	authorTimestamp, err := detectGitTimestamp(ctx, dir, author)
+	if err != nil {
+		retErr = err
+		// Keep going.
+	}
+	authorEmail, err := detectGitAuthor(ctx, dir, "%ae")
+	if err != nil {
+		retErr = err
+		// Keep going.
+	}
+	authorName, err := detectGitAuthor(ctx, dir, "%an")
+	if err != nil {
+		retErr = err
+		// Keep going.
+	}
+	coAuthors, err := detectGitCoAuthors(ctx, dir)
+	if err != nil {
+		retErr = err
+		// Keep going.
+	}
+	refs, err := detectGitRefs(ctx, dir)
 	if err != nil {
 		retErr = err
 		// Keep going.
@@ -102,30 +139,42 @@ func Metadata(ctx context.Context, dir string) (*GitMetadata, error) {
 	}
 
 	return &GitMetadata{
-		BaseDir:   filepath.ToSlash(baseDir),
-		RelDir:    filepath.ToSlash(relDir),
-		RemoteURL: remoteURL,
-		GitURL:    gitURL,
-		Hash:      hash,
-		ShortHash: shortHash,
-		Branch:    branch,
-		Tags:      tags,
-		Timestamp: timestamp,
+		BaseDir:              filepath.ToSlash(baseDir),
+		RelDir:               filepath.ToSlash(relDir),
+		RemoteURL:            remoteURL,
+		GitURL:               gitURL,
+		Hash:                 hash,
+		ShortHash:            shortHash,
+		BranchOverrideTagArg: gitBranchOverride != "",
+		Branch:               branch,
+		Tags:                 tags,
+		CommitterTimestamp:   committerTimestamp,
+		AuthorTimestamp:      authorTimestamp,
+		AuthorEmail:          authorEmail,
+		AuthorName:           authorName,
+		CoAuthors:            coAuthors,
+		Refs:                 refs,
 	}, retErr
 }
 
 // Clone returns a copy of the GitMetadata object.
 func (gm *GitMetadata) Clone() *GitMetadata {
 	return &GitMetadata{
-		BaseDir:   gm.BaseDir,
-		RelDir:    gm.RelDir,
-		RemoteURL: gm.RemoteURL,
-		GitURL:    gm.GitURL,
-		Hash:      gm.Hash,
-		ShortHash: gm.ShortHash,
-		Branch:    gm.Branch,
-		Tags:      gm.Tags,
-		Timestamp: gm.Timestamp,
+		BaseDir:              gm.BaseDir,
+		RelDir:               gm.RelDir,
+		RemoteURL:            gm.RemoteURL,
+		GitURL:               gm.GitURL,
+		Hash:                 gm.Hash,
+		ShortHash:            gm.ShortHash,
+		BranchOverrideTagArg: gm.BranchOverrideTagArg,
+		Branch:               gm.Branch,
+		Tags:                 gm.Tags,
+		CommitterTimestamp:   gm.CommitterTimestamp,
+		AuthorTimestamp:      gm.AuthorTimestamp,
+		AuthorEmail:          gm.AuthorEmail,
+		AuthorName:           gm.AuthorName,
+		CoAuthors:            gm.CoAuthors,
+		Refs:                 gm.Refs,
 	}
 }
 
@@ -220,7 +269,10 @@ func detectGitShortHash(ctx context.Context, dir string) (string, error) {
 	return strings.SplitN(outStr, "\n", 2)[0], nil
 }
 
-func detectGitBranch(ctx context.Context, dir string) ([]string, error) {
+func detectGitBranch(ctx context.Context, dir, gitBranchOverride string) ([]string, error) {
+	if gitBranchOverride != "" {
+		return []string{gitBranchOverride}, nil
+	}
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.Dir = dir
 	out, err := cmd.Output()
@@ -239,7 +291,7 @@ func detectGitTags(ctx context.Context, dir string) ([]string, error) {
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, errors.Wrap(err, "detect git current tags")
+		return nil, errors.Wrapf(ErrCouldNotDetectGitTags, "returned error %s: %s", err.Error(), string(out))
 	}
 	outStr := string(out)
 	if outStr != "" {
@@ -248,18 +300,134 @@ func detectGitTags(ctx context.Context, dir string) ([]string, error) {
 	return nil, nil
 }
 
-func detectGitTimestamp(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "log", "-1", "--format=%ct")
+func detectGitRefs(ctx context.Context, dir string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--points-at", "HEAD", "--format", "'%(refname:lstrip=-1)'")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		return "", nil
+		return nil, errors.Wrapf(ErrCouldNotDetectGitRefs, "returned error %s: %s", err.Error(), string(out))
+	}
+	outStr := string(out)
+	if outStr != "" {
+		refs := []string{}
+		for _, ref := range strings.Split(outStr, "\n") {
+			ref = strings.Trim(ref, "'\"")
+			if ref != "" && ref != "HEAD" && !slices.Contains(refs, ref) {
+				refs = append(refs, ref)
+			}
+		}
+		return refs, nil
+	}
+	return nil, nil
+}
+
+type gitTimestampType int
+
+const (
+	author gitTimestampType = iota
+	committer
+)
+
+func detectGitTimestamp(ctx context.Context, dir string, tsType gitTimestampType) (string, error) {
+	var format string
+	switch tsType {
+	case author:
+		format = "%at"
+	case committer:
+		format = "%ct"
+	}
+	cmd := exec.CommandContext(ctx, "git", "log", "-1", "--format="+format)
+	cmd.Dir = dir
+	cmd.Stderr = nil // force capture of stderr on errors
+	out, err := cmd.Output()
+	if err != nil {
+		exitError, ok := err.(*exec.ExitError)
+		if ok && strings.Contains(string(exitError.Stderr), "does not have any commits yet") {
+			return "", nil
+		}
+		return "", errors.Wrap(err, "detect git timestamp")
 	}
 	outStr := string(out)
 	if outStr == "" {
 		return "", nil
 	}
 	return strings.SplitN(outStr, "\n", 2)[0], nil
+}
+
+func detectGitAuthor(ctx context.Context, dir string, format string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "log", "-1", fmt.Sprintf("--format=%s", format))
+	cmd.Dir = dir
+	cmd.Stderr = nil // force capture of stderr on errors
+	out, err := cmd.Output()
+	if err != nil {
+		exitError, ok := err.(*exec.ExitError)
+		if ok && strings.Contains(string(exitError.Stderr), "does not have any commits yet") {
+			return "", nil
+		}
+		return "", errors.Wrap(err, "detect git author")
+	}
+	outStr := string(out)
+	if outStr == "" {
+		return "", nil
+	}
+	return strings.SplitN(outStr, "\n", 2)[0], nil
+}
+
+// ConfigEmail returns the user's currently configured (global) email address
+func ConfigEmail(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get", "user.email")
+	cmd.Stderr = nil // force capture of stderr on errors
+	out, err := cmd.Output()
+	if err != nil {
+		return "", errors.Wrap(err, "detect git global email")
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func detectGitCoAuthors(ctx context.Context, dir string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "log", "-1", "--format=%b")
+	cmd.Dir = dir
+	cmd.Stderr = nil // force capture of stderr on errors
+	out, err := cmd.Output()
+	if err != nil {
+		exitError, ok := err.(*exec.ExitError)
+		if ok && strings.Contains(string(exitError.Stderr), "does not have any commits yet") {
+			return nil, nil
+		}
+		if out != nil && strings.Contains(string(out), "does not have any commits yet") {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "detect git co-authors")
+	}
+	return ParseCoAuthorsFromBody(string(out)), nil
+}
+
+// ParseCoAuthorsFromBody returns a list of coauthor emails from a git body
+func ParseCoAuthorsFromBody(body string) []string {
+	coAuthors := []string{}
+	coAuthorsSeen := map[string]struct{}{}
+	for _, s := range strings.Split(body, "\n") {
+		s = strings.TrimSpace(s)
+		splits := strings.Split(s, " ")
+		n := len(splits)
+		if n > 2 {
+			if splits[0] == "Co-authored-by:" {
+				email := splits[n-1]
+				n = len(email)
+				if n > 2 {
+					if email[0] == '<' && email[n-1] == '>' {
+						email = email[1:(n - 1)]
+						_, seen := coAuthorsSeen[email]
+						if !seen {
+							coAuthors = append(coAuthors, email)
+							coAuthorsSeen[email] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
+	return coAuthors
 }
 
 // gitRelDir returns the relative path from git root (where .git directory locates in the project)

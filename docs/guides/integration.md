@@ -132,8 +132,8 @@ We start with a simple Earthfile that can build and create a docker image for ou
 
 We start from an appropriate docker image and set up a working directory. 
 ``` Dockerfile
-VERSION 0.6
-FROM earthly/dind:alpine
+VERSION 0.8
+FROM earthly/dind:alpine-3.19-docker-25.0.5-r0
 WORKDIR /scala-example
 RUN apk add openjdk11 bash wget postgresql-client
 ```
@@ -193,7 +193,7 @@ For unit tests, we copy in the source and run the tests.
 ``` Dockerfile
 
 unit-test:
-    FROM +project-file
+    FROM +project-files
     COPY src src
     RUN sbt test
 
@@ -206,7 +206,7 @@ We then build a Dockerfile.
 
 ``` Dockerfile
 docker:
-    FROM +project-file
+    FROM +project-files
     COPY src src
     RUN sbt assembly
     ENTRYPOINT ["java","-cp","target/scala-2.12/scala-example-assembly-1.0.jar","Main"]
@@ -235,7 +235,7 @@ integration-test:
 ```
 The `WITH DOCKER` has a `--compose` flag that we use to start up our docker-compose and run our integration tests in that context.
 
-We can now run our it tests both locally and in the CI pipeline, in a reproducible way:
+We can now run our tests both locally and in the CI pipeline, in a reproducible way:
 
 ``` bash
 > earthly -P +integration-test
@@ -331,7 +331,7 @@ all:
 =========================== SUCCESS ===========================
 ```
 
-There we have it, a reproducible integration process. If you have questions about the example, [ask](https://gitter.im/earthly-room/community)
+There we have it, a reproducible integration process. If you have questions about the example, [ask](https://earthly.dev/slack).
 
 ## See also
 * [Docker In Earthly](./docker-in-earthly.md)

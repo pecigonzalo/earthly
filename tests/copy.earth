@@ -1,6 +1,6 @@
-VERSION --use-chmod 0.6
+VERSION 0.8
 
-FROM alpine:3.15
+FROM alpine:3.18
 WORKDIR /test
 
 all:
@@ -171,12 +171,12 @@ copied/2/file" >./expected
     RUN diff -b ./actual ./expected
 
 copy-invalid-symlink-base:
-    RUN ln -s nonexistanttarget symlink
+    RUN ln -s nonexistenttarget symlink
     SAVE ARTIFACT --symlink-no-follow symlink
 
 copy-invalid-symlink:
     COPY --symlink-no-follow +copy-invalid-symlink-base/symlink .
-    RUN ls -la symlink | grep nonexistanttarget
+    RUN ls -la symlink | grep nonexistenttarget
     RUN ls symlink 2>&1 | grep 'No such file or directory'
 
 copy-dir-containing-invalid-symlink-base:
@@ -214,3 +214,25 @@ copy-chmod:
     COPY --chmod=666 in/root .
     RUN echo "./root file-mode=$(stat -c %a ./root)"
     RUN test "$(stat -c %a ./root)" = "666"
+
+copy-empty-src:
+    ARG SRC=""
+    COPY $SRC $SRC
+
+copy-empty-src-if-exists:
+    ARG SRC=""
+    COPY --if-exists $SRC $SRC
+
+copy-if-exists-wildcard:
+    COPY --if-exists non_existing_folder/* /
+
+copy-if-exists-wildcard-exists-empty:
+    COPY --if-exists existing_folder/* .
+    RUN ! test -f foo
+
+copy-if-exists-wildcard-exists:
+    COPY --if-exists existing_folder/* .
+    RUN test -f foo
+
+copy-wildcard:
+    COPY --if-exists prefix-* /

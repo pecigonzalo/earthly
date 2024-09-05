@@ -3,7 +3,18 @@
     {
       "command": {
         "args": [
-          "earthly/dind:alpine"
+          "--global",
+          "DIND_IMAGE",
+          "=",
+          "earthly/dind:alpine-3.19-docker-25.0.5-r0"
+        ],
+        "name": "ARG"
+      }
+    },
+    {
+      "command": {
+        "args": [
+          "$DIND_IMAGE"
         ],
         "name": "FROM"
       }
@@ -100,6 +111,22 @@
             ],
             "name": "BUILD"
           }
+        },
+        {
+          "command": {
+            "args": [
+              "+cgroup-v2-test-all"
+            ],
+            "name": "BUILD"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "+pre-script-test"
+            ],
+            "name": "BUILD"
+          }
         }
       ]
     },
@@ -133,7 +160,7 @@
         {
           "command": {
             "args": [
-              "alpine:3.15"
+              "alpine:3.18"
             ],
             "name": "FROM"
           }
@@ -212,7 +239,7 @@
         {
           "command": {
             "args": [
-              "alpine:3.15"
+              "alpine:3.18"
             ],
             "name": "FROM"
           }
@@ -270,7 +297,7 @@
         {
           "command": {
             "args": [
-              "alpine:3.15"
+              "alpine:3.18"
             ],
             "name": "FROM"
           }
@@ -326,6 +353,7 @@
               "=",
               "0"
             ],
+            "docs": "Index is used to create parallel tests.\n",
             "name": "ARG"
           }
         },
@@ -794,14 +822,6 @@
       "name": "one-target-many-names",
       "recipe": [
         {
-          "command": {
-            "args": [
-              "earthly/dind:alpine"
-            ],
-            "name": "FROM"
-          }
-        },
-        {
           "with": {
             "body": [
               {
@@ -853,14 +873,6 @@
       "name": "if-after",
       "recipe": [
         {
-          "command": {
-            "args": [
-              "earthly/dind:alpine"
-            ],
-            "name": "FROM"
-          }
-        },
-        {
           "with": {
             "body": [
               {
@@ -905,13 +917,123 @@
           }
         }
       ]
+    },
+    {
+      "name": "cgroup-v2-test-all",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "+cgroup-v2-test",
+              "--DIND_IMG=$DIND_IMAGE",
+              "--DIND_IMG=earthly/dind:ubuntu-23.04-docker-25.0.2-1"
+            ],
+            "name": "BUILD"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cgroup-v2-test",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "--required",
+              "DIND_IMG"
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "$DIND_IMG"
+            ],
+            "name": "FROM"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "test-cgroup-v2.sh",
+              "test-cgroup-v2-inside-container.sh",
+              "."
+            ],
+            "name": "COPY"
+          }
+        },
+        {
+          "command": {
+            "args": [
+              "ubuntu_img_tag",
+              "=",
+              "23.04"
+            ],
+            "name": "ARG"
+          }
+        },
+        {
+          "with": {
+            "body": [
+              {
+                "command": {
+                  "args": [
+                    "./test-cgroup-v2.sh"
+                  ],
+                  "name": "RUN"
+                }
+              }
+            ],
+            "command": {
+              "args": [
+                "--pull",
+                "ubuntu:$ubuntu_img_tag"
+              ],
+              "name": "DOCKER"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "pre-script-test",
+      "recipe": [
+        {
+          "command": {
+            "args": [
+              "pre-script.sh",
+              "/usr/share/earthly/dockerd-wrapper-pre-script"
+            ],
+            "name": "COPY"
+          }
+        },
+        {
+          "with": {
+            "body": [
+              {
+                "command": {
+                  "args": [
+                    "test",
+                    "-f",
+                    "/the-prescript-was-run"
+                  ],
+                  "name": "RUN"
+                }
+              }
+            ],
+            "command": {
+              "args": [],
+              "name": "DOCKER"
+            }
+          }
+        }
+      ]
     }
   ],
   "version": {
     "args": [
-      "--parallel-load",
-      "--shell-out-anywhere",
-      "0.6"
+      "0.8"
     ]
   }
 }

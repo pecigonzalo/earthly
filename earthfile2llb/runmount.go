@@ -1,11 +1,14 @@
 package earthfile2llb
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
 	"path"
 	"strconv"
 	"strings"
 
-	"github.com/earthly/earthly/states/dedup"
+	"github.com/earthly/earthly/domain"
 	"github.com/earthly/earthly/util/llbutil/pllb"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/pkg/errors"
@@ -31,7 +34,7 @@ func (c *Converter) parseMount(mount string) ([]llb.RunOption, error) {
 	var mountType string
 	var mountMode int
 	var mountOpts []llb.MountOption
-	sharingMode := llb.CacheMountShared
+	sharingMode := llb.CacheMountLocked
 	kvPairs := strings.Split(mount, ",")
 	for _, kvPair := range kvPairs {
 		kvSplit := strings.SplitN(kvPair, "=", 2)
@@ -84,14 +87,14 @@ func (c *Converter) parseMount(mount string) ([]llb.RunOption, error) {
 			// if err != nil {
 			// 	return nil, errors.Errorf("invalid mount arg %s", kvPair)
 			// }
-		case "mode":
+		case "mode", "chmod":
 			if len(kvSplit) != 2 {
 				return nil, errors.Errorf("invalid mount arg %s", kvPair)
 			}
 			var err error
-			mountMode, err = parseMode(kvSplit[1])
+			mountMode, err = ParseMode(kvSplit[1])
 			if err != nil {
-				return nil, errors.Errorf("failed to parse mount mode %s", kvSplit[1])
+				return nil, errors.Errorf("failed to parse mount %s %s", kvSplit[0], kvSplit[1])
 			}
 		case "sharing":
 			if len(kvSplit) != 2 {
@@ -116,10 +119,6 @@ func (c *Converter) parseMount(mount string) ([]llb.RunOption, error) {
 	if mountType == "" {
 		return nil, errors.Errorf("mount type not specified")
 	}
-	if mountID == "" {
-		mountID = path.Clean(mountTarget)
-	}
-
 	switch mountType {
 	case "bind-experimental":
 		if mountSource == "" {
@@ -137,16 +136,18 @@ func (c *Converter) parseMount(mount string) ([]llb.RunOption, error) {
 		if mountTarget == "" {
 			return nil, errors.Errorf("mount target not specified")
 		}
-		if mountMode != 0 {
-			return nil, errors.Errorf("mode is not supported for type=cache")
+		if mountMode == 0 {
+			mountMode = 0644
 		}
-		key, err := cacheKeyTargetInput(c.targetInputActiveOnly())
-		if err != nil {
-			return nil, err
+		key := cacheKey(c.target)
+		cacheID := path.Join("/run/cache", key, path.Clean(mountTarget))
+		if c.ftrs.GlobalCache && mountID != "" {
+			cacheID = mountID
 		}
-		cachePath := path.Join("/run/cache", key, mountID)
-		mountOpts = append(mountOpts, llb.AsPersistentCacheDir(cachePath, sharingMode))
+		mountOpts = append(mountOpts, llb.AsPersistentCacheDir(cacheID, sharingMode))
 		state = c.cacheContext
+		state = state.File(pllb.Mkdir("/cache", os.FileMode(mountMode)))
+		mountOpts = append(mountOpts, llb.SourcePath("/cache"))
 		return []llb.RunOption{pllb.AddMount(mountTarget, state, mountOpts...)}, nil
 	case "tmpfs":
 		if mountTarget == "" {
@@ -159,7 +160,11 @@ func (c *Converter) parseMount(mount string) ([]llb.RunOption, error) {
 		mountOpts = append(mountOpts, llb.Tmpfs())
 		return []llb.RunOption{pllb.AddMount(mountTarget, state, mountOpts...)}, nil
 	case "ssh-experimental":
-		sshOpts := []llb.SSHOption{llb.SSHID(mountID)}
+		sshID := mountID
+		if sshID == "" {
+			sshID = path.Clean(mountTarget)
+		}
+		sshOpts := []llb.SSHOption{llb.SSHID(sshID)}
 		if mountTarget != "" {
 			sshOpts = append(sshOpts, llb.SSHSocketTarget(mountTarget))
 		}
@@ -176,9 +181,11 @@ func (c *Converter) parseMount(mount string) ([]llb.RunOption, error) {
 			//       buildkit side. Then we wouldn't need to open this up to everyone.
 			mountMode = 0444
 		}
-
-		secretName := strings.TrimPrefix(mountID, "+secrets/")
-
+		secretID := mountID
+		if secretID == "" {
+			secretID = path.Clean(mountTarget)
+		}
+		secretName := strings.TrimPrefix(secretID, "+secrets/")
 		secretOpts := []llb.SecretOption{
 			llb.SecretID(c.secretID(secretName)),
 			llb.SecretFileOpt(0, 0, mountMode),
@@ -191,7 +198,7 @@ func (c *Converter) parseMount(mount string) ([]llb.RunOption, error) {
 
 var errInvalidOctal = errors.New("invalid octal")
 
-func parseMode(s string) (int, error) {
+func ParseMode(s string) (int, error) {
 	if len(s) == 0 || s[0] != '0' {
 		return 0, errInvalidOctal
 	}
@@ -199,10 +206,10 @@ func parseMode(s string) (int, error) {
 	return int(mode), err
 }
 
-func cacheKeyTargetInput(ti dedup.TargetInput) (string, error) {
-	digest, err := ti.HashNoTag()
-	if err != nil {
-		return "", errors.Wrapf(err, "compute hash key for %s", ti.TargetCanonical)
-	}
-	return digest, nil
+// cacheKey returns a key that can be used to uniquely identify the target.
+// Cache mounts use this key to ensure that the cache is unique to the target.
+func cacheKey(target domain.Target) string {
+	target.Tag = "" // Strip away tag info (e.g. git sha)
+	digest := sha256.Sum256([]byte(target.StringCanonical()))
+	return hex.EncodeToString(digest[:])
 }

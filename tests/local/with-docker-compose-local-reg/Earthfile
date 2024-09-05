@@ -1,4 +1,4 @@
-VERSION --use-registry-for-with-docker 0.6
+VERSION 0.8
 
 all:
     ARG FRONTEND=docker
@@ -6,7 +6,7 @@ all:
     BUILD +test
 
 fetch:
-    FROM alpine:3.10
+    FROM alpine:3.18
     RUN apk add curl
     COPY fetch.sh /bin/fetch
     CMD ["/bin/fetch"]
@@ -15,9 +15,11 @@ test:
     LOCALLY
     ARG FRONTEND=docker
     ARG FRONTEND_COMPOSE="docker compose"
+    ARG acbgrep=../../../scripts/acbtest/acbgrep
+    RUN test -f "$acbgrep"
     WITH DOCKER \
             --compose docker-compose.yml \
             --service webserver \
             --load fetch:latest=+fetch
-        RUN $FRONTEND_COMPOSE up --exit-code-from fetch fetch | grep 'Hello World'
+        RUN $FRONTEND_COMPOSE up --exit-code-from fetch fetch | "$acbgrep" 'Hello World'
     END

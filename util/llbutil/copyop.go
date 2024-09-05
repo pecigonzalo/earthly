@@ -16,7 +16,7 @@ import (
 )
 
 // CopyOp is a simplified llb copy operation.
-func CopyOp(srcState pllb.State, srcs []string, destState pllb.State, dest string, allowWildcard bool, isDir bool, keepTs bool, chown string, chmod *fs.FileMode, ifExists, symlinkNoFollow, merge bool, opts ...llb.ConstraintsOpt) pllb.State {
+func CopyOp(ctx context.Context, srcState pllb.State, srcs []string, destState pllb.State, dest string, allowWildcard, isDir, keepTs bool, chown string, chmod *fs.FileMode, ifExists, symlinkNoFollow, merge bool, opts ...llb.ConstraintsOpt) (pllb.State, error) {
 	destAdjusted := dest
 	if dest == "." || dest == "" || len(srcs) > 1 {
 		destAdjusted += string("/") // TODO: needs to be the containers platform, not the earthly hosts platform. For now, this is always Linux.
@@ -30,15 +30,13 @@ func CopyOp(srcState pllb.State, srcs []string, destState pllb.State, dest strin
 		baseCopyOpts = append(baseCopyOpts, llb.WithCreatedTime(*defaultTs()))
 	}
 	for _, src := range srcs {
-		if ifExists {
-			// If the copy came in as optional (ifExists), then we need to trigger the
-			// underlying wildcard matching and allow empty wildcards. The matching uses
-			// the filepath.Match syntax, so by simply creating a wildcard where the
-			// first letter needs to match the current first letter gets us the single
-			// match; and no error if it is missing.
-
-			//Normalize path by dropping './'
+		if ifExists && len(src) != 0 {
+			// Strip ./ and / prefixes as to make paths relative to top-level.
 			src = strings.TrimPrefix(src, "./")
+			src = strings.TrimPrefix(src, "/")
+			// HACK: For COPY --if-exists, we can use a glob expression (e.g., '[f]oo') to
+			// prevent errors caused by non-existing files. This approach also works
+			// with additional wildcards (e.g., '[f]oo/*').
 			src = fmt.Sprintf("[%s]%s", string(src[0]), string(src[1:]))
 		}
 		copyOpts := append([]llb.CopyOption{
@@ -59,17 +57,21 @@ func CopyOp(srcState pllb.State, srcs []string, destState pllb.State, dest strin
 		}
 	}
 	if fa == nil {
-		return destState
+		return destState, nil
 	}
 	if merge && chown == "" {
-		return pllb.Merge([]pllb.State{destState, pllb.Scratch().File(fa)}, opts...)
+		cwd, err := destState.GetDir(ctx)
+		if err != nil {
+			return pllb.State{}, err
+		}
+		return pllb.Merge([]pllb.State{destState, pllb.Scratch().Dir(cwd).File(fa)}, opts...).Dir(cwd), nil
 	}
-	return destState.File(fa, opts...)
+	return destState.File(fa, opts...), nil
 }
 
 // CopyWithRunOptions copies from `src` to `dest` and returns the result in a separate LLB State.
 // This operation is similar llb.Copy, however, it can apply llb.RunOptions (such as a mount)
-// Interanally, the operation runs on the internal COPY image used by Dockerfile.
+// Internally, the operation runs on the internal COPY image used by Dockerfile.
 func CopyWithRunOptions(srcState pllb.State, src, dest string, platr *platutil.Resolver, opts ...llb.RunOption) pllb.State {
 	// Docker's internal image for running COPY.
 	// Ref: https://github.com/moby/buildkit/blob/v0.9.3/frontend/dockerfile/dockerfile2llb/convert.go#L40
@@ -77,7 +79,7 @@ func CopyWithRunOptions(srcState pllb.State, src, dest string, platr *platutil.R
 	// Use the native platform instead of the target platform.
 	imgOpts := []llb.ImageOption{llb.MarkImageInternal, llb.Platform(platr.LLBNative())}
 
-	// The following executes the `copy` command, which is a custom exectuable
+	// The following executes the `copy` command, which is a custom executable
 	// contained in the Dockerfile COPY image above. The following .Run()
 	// operation executes in a state constructed from that Dockerfile COPY image,
 	// with the Earthly user's state mounted at /dest on that image.

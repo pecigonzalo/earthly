@@ -18,7 +18,7 @@ This guide will cover both approaches to constructing your image.
 This is the recommended approach when adopting Earthly into your containerized CI. Start by basing your custom image on ours:
 
 ```docker
-FROM earthly/earthly:v0.6.25
+FROM earthly/earthly:v0.8.13
 RUN ... # Add your agent, certificates, tools...
 ```
 
@@ -50,7 +50,7 @@ In this setup, Earthly will be allowed to manage an instance of its `earthly/bui
 To enable this, simply follow the installation instructions within your Dockerfile/Earthfile as you would on any other host. An example of installing this can be found below.
 
 ```docker
-RUN wget https://github.com/earthly/earthly/releases/download/v0.6.25/earthly-linux-amd64 -O /usr/local/bin/earthly && \
+RUN wget https://github.com/earthly/earthly/releases/download/v0.8.13/earthly-linux-amd64 -O /usr/local/bin/earthly && \
     chmod +x /usr/local/bin/earthly && \
     /usr/local/bin/earthly bootstrap
 ```
@@ -89,11 +89,11 @@ fail with the error: `sh: write error: Resource busy`.
 
 ## An important note about running the image
 
-When running the built image in your CI of choice, if you're not using a remote daemon, Earthly will start Buildkit within the same container. In this case, it is important to ensure that the directory used by Buildkit to cache the builds is mounted as a Docker volume. Failing to do so may result in excessive disk usage, slow builds, or Earthly not functioning properly.
+When running the built image in your CI of choice, if you're not using a remote daemon, Earthly will start BuildKit within the same container. In this case, it is important to ensure that the directory used by BuildKit to cache the builds is mounted as a Docker volume. Failing to do so may result in excessive disk usage, slow builds, or Earthly not functioning properly.
 
 {% hint style='danger' %}
 ##### Important
-We *strongly* recommend using a Docker volume for mounting `/tmp/earthly`. If you do not, Buildkit can consume excessive disk space, operate very slowly, or it might not function correctly.
+We *strongly* recommend using a Docker volume for mounting `/tmp/earthly`. If you do not, BuildKit can consume excessive disk space, operate very slowly, or it might not function correctly.
 {% endhint %}
 
 In some environments, not mounting `/tmp/earthly` as a Docker volume results in the following error:

@@ -1,17 +1,17 @@
-VERSION 0.6
-FROM alpine:3.15
+VERSION --pass-args --use-function-keyword 0.7
+FROM alpine:3.18
 RUN apk add jq
 WORKDIR /test
 
-ARG DOCKERHUB_USER_SECRET=+secrets/DOCKERHUB_USER
-ARG DOCKERHUB_TOKEN_SECRET=+secrets/DOCKERHUB_TOKEN
-ARG DOCKERHUB_MIRROR
-ARG DOCKERHUB_MIRROR_INSECURE=false
-ARG DOCKERHUB_AUTH=true
-
 COPY ../..+earthly/earthly /usr/local/bin/earthly
 
+# all runs all tests
 all:
+    BUILD +group1
+    BUILD +group2
+    BUILD +group3
+
+group1:
     BUILD +test \
         --TEST=build-arg \
         --TEST=builtin-args \
@@ -19,7 +19,7 @@ all:
         --TEST=cache2 \
         --TEST=chown \
         --TEST=comments \
-        --TEST=smoke \
+        --TEST=parser-smoke \
         --TEST=copy \
         --TEST=dotenv \
         --TEST=empty-git \
@@ -34,7 +34,10 @@ all:
         --TEST=file-copying \
         --TEST=from-expose \
         --TEST=gen-dockerfile \
-        --TEST=git-clone \
+        --TEST=git-clone
+
+group2:
+    BUILD +test \
         --TEST=host \
         --TEST=host-bind \
         --TEST=if-exists \
@@ -57,12 +60,17 @@ all:
         --TEST=with-docker-compose \
         --TEST=command \
         --TEST=import
-    BUILD +test --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=args
-    BUILD +test --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=if
-    BUILD +test --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=for
-    BUILD +test --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=empty-targets
-    BUILD +test --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=quotes
 
+group3:
+    BUILD +test --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" \
+        --TEST=args \
+        --TEST=if \
+        --TEST=for \
+        --TEST=empty-targets \
+        --TEST=quotes \
+        --TEST=documentation
+
+# update-all updates all the expected values of the tests
 update-all:
     BUILD +update-expected \
         --TEST=build-arg \
@@ -71,7 +79,7 @@ update-all:
         --TEST=cache2 \
         --TEST=chown \
         --TEST=comments \
-        --TEST=smoke \
+        --TEST=parser-smoke \
         --TEST=copy \
         --TEST=dotenv \
         --TEST=empty-git \
@@ -114,6 +122,7 @@ update-all:
     BUILD +update-expected --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=for
     BUILD +update-expected --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=empty-targets
     BUILD +update-expected --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=quotes
+    BUILD +update-expected --INPUT_FROM_DIR=./ --INPUT_FROM_TARGET="" --TEST=documentation
 
 # Note: If this test fails for expected reasons (eg format of AST has changed), you can
 #       update the expectations via +update-all. Please review the resulting diff
@@ -122,7 +131,7 @@ test:
     ARG --required TEST
     ARG INPUT_FROM_DIR=../../tests
     ARG INPUT_FROM_TARGET=ast-test-input
-    DO +INPUT_COPY --TEST=$TEST --INPUT_FROM_DIR=$INPUT_FROM_DIR --INPUT_FROM_TARGET=$INPUT_FROM_TARGET
+    DO --pass-args +INPUT_COPY --TEST=$TEST --INPUT_FROM_DIR=$INPUT_FROM_DIR --INPUT_FROM_TARGET=$INPUT_FROM_TARGET
     COPY ${TEST}.ast.json ./expected.json
     RUN jq -S . ./expected.json >./expected.pretty.json
     RUN earthly debug ast ${TEST}.earth >./actual.json
@@ -133,13 +142,13 @@ update-expected:
     ARG --required TEST
     ARG INPUT_FROM_DIR=../../tests
     ARG INPUT_FROM_TARGET=ast-test-input
-    DO +INPUT_COPY --TEST=$TEST --INPUT_FROM_DIR=$INPUT_FROM_DIR --INPUT_FROM_TARGET=$INPUT_FROM_TARGET
+    DO --pass-args +INPUT_COPY --TEST=$TEST --INPUT_FROM_DIR=$INPUT_FROM_DIR --INPUT_FROM_TARGET=$INPUT_FROM_TARGET
     RUN earthly debug ast ${TEST}.earth >./expected.json
     RUN jq -S . ./expected.json >./expected.pretty.json
     SAVE ARTIFACT ./expected.pretty.json AS LOCAL ./${TEST}.ast.json
 
 INPUT_COPY:
-    COMMAND
+    FUNCTION
     ARG TEST
     ARG INPUT_FROM_DIR
     ARG INPUT_FROM_TARGET
@@ -147,13 +156,5 @@ INPUT_COPY:
     IF [[ -z $INPUT_FROM_TARGET ]]
         COPY ${INPUT_FROM_DIR}${TEST}.earth ./
     ELSE
-        COPY \
-            ( \
-                ${INPUT_FROM_DIR}+${INPUT_FROM_TARGET}/${TEST}.earth \
-                --DOCKERHUB_AUTH=$DOCKERHUB_AUTH \
-                --DOCKERHUB_USER_SECRET=$DOCKERHUB_USER_SECRET \
-                --DOCKERHUB_TOKEN_SECRET=$DOCKERHUB_TOKEN_SECRET \
-                --DOCKERHUB_MIRROR=$DOCKERHUB_MIRROR \
-                --DOCKERHUB_MIRROR_INSECURE=$DOCKERHUB_MIRROR_INSECURE \
-            ) .
+        COPY --pass-args ${INPUT_FROM_DIR}+${INPUT_FROM_TARGET}/${TEST}.earth .
     END
